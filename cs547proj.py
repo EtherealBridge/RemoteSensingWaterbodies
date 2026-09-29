@@ -117,11 +117,22 @@ class Mode(Enum):
   DEMO = 2,
 
 #IOU Metric Types
-class IOUMetricType(Enum):
+class MetricType(Enum):
   TOTALIOU = 0
   AVGIOU = 1
   CLASSACCURACY = 2
-  PIXELACCURACY = 3
+  BOXACCURACY = 3
+  PIXELACCURACY = 4
+  PRECISION = 5
+  ACCURACY = 6
+  F1 = 7
+  DICE = 8
+
+#Represents all the possible cycle states this model can be in
+class CycleType(Enum):
+  TRAINING = 0
+  VALIDATION = 1
+  TESTING = 2
 
 #-----------------------------------#
 #Properties
@@ -137,6 +148,7 @@ MODE = Mode.DEMO
 #Set the filepath (for saving and loading)
 model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/model.keras"
 csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"
+metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"
 bounding_box_annotations = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/annotations/_annotations.csv"
 rgb_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/data/"
 
@@ -347,14 +359,61 @@ def dict_to_tuple(inputs):
         inputs["bounding_boxes"], max_boxes=MAX_ANCHOR_BOXES
     )
 
-
-#Writes the log to file with the correct epoch. Use TESTING if testing.
-def write_log(epoch, logstr):
+#Write text to a file
+#epoch - The current epoch if applicable. Otherwise set as -1
+#logstr - The log string to write to file
+#filename - The full file patht o write to
+def write_file(epoch, logstr, file_path):
   try:
-      with open(csv_path, 'a') as file:
+      with open(file_path, 'a') as file:
         file.write(logstr + '\n')
   except Exception as e:
       print("Could not write epoch to file : " + str(epoch))
+
+#Get the metric file path from the metric type and cycle type
+#metric_type - Type of metric used (type of MetricType)
+#cycle_type - What cycle is this in? Training? Validation? Testing?
+def get_metric_file_path(metric_type, cycle_type):
+  prefix = "training_"
+  if(cycle_type == CycleType.VALIDATION):
+    prefix="validation_"
+  if(cycle_type == CycleType.TESTING):
+    prefix="testing_"
+
+  descriptor = "total_iou_"
+  if(metric_type == MetricType.AVGIOU):
+    descriptor = "avg_iou_"
+  elif (metric_type == MetricType.CLASSACCURACY):
+    descriptor = "class_accuracy_"
+  elif (metric_type == MetricType.BOXACCURACY):
+    descriptor = "box_accuracy_"
+  elif (metric_type == MetricType.PIXELACCURACY):
+    descriptor = "pixel_accuracy_"
+  elif (metric_type == MetricType.PRECISION):
+    descriptor = "precision_"
+  elif (metric_type == MetricType.ACCURACY):
+    descriptor = "accuracy_"
+  elif (metric_type == MetricType.F1):
+    descriptor = "f1_"
+  elif (metric_type == MetricType.DICE):
+      descriptor = "dice_"
+
+  return metric_base_path + prefix + descriptor + ".txt"
+
+#Writes a metric to file
+def write_metric(epoch, metric_type, cycle_type, metric_val):
+
+  #Get the filename to write to
+  metric_file_path = get_metric_file_name(metric_type, cycle_type)
+
+  #Write to file
+  write_file(epoch, str(metric_val), metric_file_path)
+
+#Writes the log to file with the correct epoch.
+#epoch - The current epoch if applicable. Otherwise set as -1
+#logstr - The log string to write to file
+def write_log(epoch, logstr):
+  write_file(epoch, logstr, csv_path)
 
 #Run the evaluation for the model
 #Evaluates using COCO metrics - mAP
@@ -418,17 +477,59 @@ def calculate_iou():
 # #The dice loss of the predicted data vs. the acutal, defined as 2*intersection divided by (sum(y_pred) + sum(y_actual))
 # def get_dice_loss(y_pred, y_actual):
 
+#TODO: WRITE INDIVIDUAL METRICS TO FILE - DURING TESTING AND/OR TRAINING/VALIDATION
+#Write individual metrics to their own files based on the current cycle (training, validation, testing) as well
+#metric_type - Type of metric used (type of MetricType)
+#cycle_type - What cycle is this in? Training? Validation? Testing?
+def write_metric_file(metric_type, cycle_type):
+  metric_file_path = get_metric_file_path(metric_type, cycle_type)
+
 
 # #https://www.geeksforgeeks.org/machine-learning/f1-score-in-machine-learning/
 # #Use the y predicted and y actual values to get the f1 score, which is defined by 
 # # (2 x ((Precision * Recall ) / (Precision + Recall)))
-# def get_f1_score(y_pred, y_actual):
+def get_f1_score(y_pred, y_actual, class_index = -1):
+  if(class_index > -1):
+      keras_f1 = keras.metrics.F1Score(thresholds=0.5, class_id=class_index)
+  else:
+      keras_f1 = keras.metrics.F1Score(thresholds=0.5)
+  keras_f1.update_state(y_actual, y_pred)
+  return keras_f1.result()
 
-# #Calculate the recall based on the predicted values vs. actual values
-# def get_recall(y_pred, y_actual):
+#Calculate the recall based on the predicted values vs. actual values
+def get_recall(y_pred, y_actual, class_index = -1):
+  if(class_index > -1):
+    keras_recall = keras.metrics.Recall(thresholds=0.5, class_id=class_index)
+  else:
+    keras_recall = keras.metrics.Recall(thresholds=0.5)
+  keras_recall.update_state(y_actual, y_pred)
+  return keras_recall.result()
 
+#https://www.tensorflow.org/api_docs/python/tf/keras/metrics/Precision
 # #Calculate the precision based on the predicted values vs. actual values
-# def get_precision(y_pred, y_actual):
+#y_pred - The y predicted values (from the model)
+#y_actual - The actual ground truth values
+#class_index (Optional) - The class to get precision for. If blank, will get precision for everything.
+def get_precision(y_pred, y_actual, class_index = -1):
+  if(class_index > -1):
+    keras_precision = keras.metrics.Precision(thresholds=0.5, class_id=class_index)
+  else:
+    keras_precision = keras.metrics.Precision(thresholds=0.5)
+  keras_precision.update_state(y_actual, y_pred)
+  return keras_precision.result()
+
+#logs the actual precision and recall per class
+#y_pred - The y predicted values (from the model)
+#y_actual - The actual ground truth values
+def output_metrics_per_class(y_pred,y_actual):
+  write_log(-1, "Precision per classs: ")
+  for class_index in range(0, class_count):
+    class_name = CLASS_LIST[i]
+    class_precision = get_precision(y_pred, y_actual, class_index)
+    class_recall = get_recall(y_pred, y_actual, class_index)
+    class_f1 = get_f1_score(y_pred, y_actual, class_index)
+    class_precision_text = class_name + "[" + str(class_index) + "] ::: P=" + str(class_precision) + ", R=" + str(class_recall) + ", F1=" + str(class_f1)
+    write_log(class_precision_text)
 
 
 #Gets the area of the square in which two bounding boxes intersect. 0.0 = no intersection at all
@@ -469,7 +570,7 @@ def get_iou(start_predx, start_predy, start_actx, start_acty, end_predx, end_pre
 #y_actual - The actual values
 #metric_type - Should the metric here be the average iou? 
 #specific_class - If this is for a specific class, the class number. -1 = all classes TODO
-def calculate_iou_metric(y_pred, y_actual, metric_type = IOUMetricType.TOTALIOU, specific_class=-1):
+def calculate_iou_metric(y_pred, y_actual, metric_type = MetricType.TOTALIOU, specific_class=-1):
 
   pred_classes = y_pred["classes"]
   pred_boxes = y_pred["boxes"]
@@ -547,7 +648,7 @@ def calculate_iou_metric(y_pred, y_actual, metric_type = IOUMetricType.TOTALIOU,
           iou = get_iou(x0P, y0P, x0A, y0A, x1P, y1P, x1A, y1A)
           total_iou += iou
 
-  if(metric_type == IOUMetricType.AVGIOU):
+  if(metric_type == MetricType.AVGIOU):
     print("Total Box Count = " + str(total_box_count))
     if(total_box_count > 0):
       return total_iou / total_box_count
@@ -562,7 +663,7 @@ def calculate_iou_metric(y_pred, y_actual, metric_type = IOUMetricType.TOTALIOU,
 #specific_class - (optional) - The specific class to calculate average iou for
 #returns - The total iou
 def get_total_iou(y_pred, y_actual, specific_class = -1):
-  return calculate_iou_metric(y_pred, y_actual, IOUMetricType.TOTALIOU, specific_class)
+  return calculate_iou_metric(y_pred, y_actual, MetricType.TOTALIOU, specific_class)
 
 #Calculates the average IOU
 #y_pred - The predicted values
@@ -570,7 +671,7 @@ def get_total_iou(y_pred, y_actual, specific_class = -1):
 #specific_class - (optional) - The specific class to calculate average iou for
 #returns - The average iou
 def get_avg_iou(y_pred, y_actual, specific_class = -1):
-  return calculate_iou_metric(y_pred, y_actual, IOUMetricType.AVGIOU, specific_class)
+  return calculate_iou_metric(y_pred, y_actual, MetricType.AVGIOU, specific_class)
 
 #Given the class name, convert it to the class index
 #classname (string) - The name of the class to convert to an index - must match values in CLASS_LIST
@@ -906,8 +1007,8 @@ else:
 
       #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
 
-      # #Get the precision scores for predicted values vs. actual values
-      # precision = get_precision(y_pred, y_true)
+      #Get the precision scores for predicted values vs. actual values
+      precision = get_precision(y_pred, y_true)
 
       # #Get the recall for predicted values vs. actual values
       # recall = get_recall(y_pred, y_true)
