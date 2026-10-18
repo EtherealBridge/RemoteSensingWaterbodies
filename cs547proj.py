@@ -124,8 +124,8 @@ class CycleType(Enum):
 MODE = Mode.DEMO
 
 #Select the specific model type - YOLO (bounding box segmentation) or U-NET Xception-Like Model
-#MODEL_TYPE = ModelType.YOLO
-MODEL_TYPE = ModelType.UNET
+MODEL_TYPE = ModelType.YOLO
+#MODEL_TYPE = ModelType.UNET
 
 #Set the filepath (for saving and loading)
 if(MODEL_TYPE == ModelType.YOLO):
@@ -171,7 +171,7 @@ OPTIMIZER = Optimizer.ADAM
 
 #Numb
 # er of training epochs (loops) to run
-EPOCHS = 2000
+EPOCHS = 500
 
 #Should the trainer show extra status text?
 VERBOSE = 1
@@ -180,7 +180,7 @@ VERBOSE = 1
 BATCH_SIZE = 4
 
 #Maximum bounding boxes per image
-MAX_ANCHOR_BOXES = 256
+MAX_ANCHOR_BOXES = 64
 
 #Scoring IOU Threshold - typically 50% per https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
 #All scores below this will be considered "wrong." All scores greater than or equal to this will be considered "right"
@@ -194,7 +194,7 @@ VALIDATION_SPLIT_PCT = 0.05
 #TODO: USE DIFFERENT SEGMENTS OF WATER...
 #Class List - Updated to segment water into different sizes for better results
 #I would like to expand this model to a three class problem instead of one
-CLASS_LIST = ("Lake","Ocean","Pool","River","Wetlands")
+CLASS_LIST = ("Lake","River")
 class_mapping = dict(zip(range(len(CLASS_LIST)), CLASS_LIST))
 
 #Number of classes in this problem. Though we're looking at water vs. not water, we're really just looking for water, so, one class.
@@ -212,9 +212,9 @@ IMAGE_CUT_EDGES_SIZE = 4
 #Data Augmentation Properties
 AUGMENTATION_FLIP_VERTICALLY = True
 AUGMENTATION_FLIP_HORIZONTALLY = True
-AUGMENTATION_RANDOM_GAUSSIAN_BLUR = True
-AUGMENTATION_RANDOM_ROTATION = True
-AUGMENTATION_RANDOM_COLORJITTER = True
+AUGMENTATION_RANDOM_GAUSSIAN_BLUR = False
+AUGMENTATION_RANDOM_ROTATION = False
+AUGMENTATION_RANDOM_COLORJITTER = False
 
 #Represents a bounding box on an image
 #x - The x coordinate of the center of this bounding box
@@ -263,8 +263,9 @@ def load_image(image_path, channels):
     image = tf.io.read_file(image_path)
     image = tf.image.decode_jpeg(image, channels=channels)
 
+    #TODO: RESTORE THIS LATER FOR UNET SEG!
     #Resize the image to the correct file size
-    image = tf.image.resize(image, (FILESIZE, FILESIZE), method="bilinear")
+    #image = tf.image.resize(image, (FILESIZE, FILESIZE), method="bilinear")
 
     return image
 
@@ -722,7 +723,7 @@ def output_metrics_per_class(y_pred,y_actual):
   if(MODEL_TYPE == ModelType.YOLO):
 
     #IoU Amouts to use as thresholds
-    iou_thresholds = [0.5,0.75,0.9]
+    iou_thresholds = [0.5, 0.95]
 
     #For each IoU threshold, create a distinct report
     for iou_threshold in iou_thresholds:
@@ -814,7 +815,10 @@ def output_metrics_per_class(y_pred,y_actual):
     #Output metrics for segmentation
     else:
 
+      #TODO: PSEUDOCODE FOR SEMANTIC SEGMENTATION...
       
+      #Clear log register:
+      log_messages = []
 
 #Given y_predicted values and y_actual values, calculate the IOU
 #y_pred - The predicted values
@@ -1152,6 +1156,9 @@ def get_augmentation_layers(file_size, class_count):
     if(AUGMENTATION_RANDOM_ROTATION):
       layers.append(keras_cv.layers.RandomRotation(factor=(0.0,1.0),bounding_box_format="xyxy", segmentation_classes=class_count))
 
+    #TODO: ADDED FOR TESTING
+    layers.append(keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy"))
+
   else:
     #layers.append(keras_cv.layers.Resizing(file_size,file_size,"bilinear",pad_to_aspect_ratio=True))
     if(AUGMENTATION_FLIP_VERTICALLY):
@@ -1164,6 +1171,7 @@ def get_augmentation_layers(file_size, class_count):
     layers.append(keras_cv.layers.RandomGaussianBlur(kernel_size=3,factor=(0.0,0.1)))
   if(AUGMENTATION_RANDOM_COLORJITTER):
     layers.append(keras_cv.layers.RandomColorJitter(value_range=(0,255),brightness_factor=(-0.05,0.05),contrast_factor=(0.0,0.05),saturation_factor=(0.35,0.45), hue_factor=(0.0,0.05)))
+
 
   augmenter = keras.Sequential(layers)
   return augmenter
@@ -1190,7 +1198,7 @@ mask_full_paths = []
 ####
 
 #Select image files from all files
-for genericFile in sorted(os.listdir(image_data_path)):
+for genericFile in (os.listdir(image_data_path)):
   name, fileExtension = os.path.splitext(genericFile)
   if fileExtension == ".jpg" or fileExtension == ".jpeg":
     img_full_paths.append(image_data_path + genericFile)
@@ -1198,7 +1206,7 @@ for genericFile in sorted(os.listdir(image_data_path)):
 #Only load mask paths if using semantic segmentation. YOLO uses bounding boxes instead.
 if(MODEL_TYPE == ModelType.UNET):
   #Select mask files from all files
-  for genericFile in sorted(os.listdir(image_data_path)):
+  for genericFile in (os.listdir(image_data_path)):
     name, fileExtension = os.path.splitext(genericFile)
     if fileExtension == ".png":
       mask_full_paths.append(image_data_path + genericFile)
@@ -1253,14 +1261,14 @@ if(MODEL_TYPE == ModelType.YOLO):
   test_ds = test_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
   
   #Function that resizes image to FILESIZExFILESIZE coordinates with bilinear filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
-  #resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
+  resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
+  
 else:
   train_ds = train_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
   val_ds = val_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
   test_ds = test_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
 
-  # #Function that resizes image to FILESIZExFILESIZE coordinates with bilinear filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
-  # resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True)
+
 
 train_ds = train_ds.shuffle(BATCH_SIZE * 4)
 train_ds = train_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
@@ -1269,13 +1277,17 @@ train_ds = train_ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
 #Load validation data
 val_ds = val_ds.shuffle(BATCH_SIZE * 4)
 val_ds = val_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
-#val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
+
+if(MODEL_TYPE == ModelType.YOLO):
+  val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
 #Load testing data
 testing_len = len(test_data)
 test_ds = test_ds.shuffle(testing_len)
 test_ds = test_ds.ragged_batch(testing_len, drop_remainder=False)
-# test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
+
+if(MODEL_TYPE == ModelType.YOLO):
+  test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
 
 #Choose the optimizer
@@ -1322,7 +1334,6 @@ if(MODE == Mode.TRAIN):
 
 else:
    
-
   #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
   loaded_model = keras.saving.load_model(model_path)
 
