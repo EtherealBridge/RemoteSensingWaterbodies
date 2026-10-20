@@ -124,8 +124,8 @@ class CycleType(Enum):
 MODE = Mode.DEMO
 
 #Select the specific model type - YOLO (bounding box segmentation) or U-NET Xception-Like Model
-MODEL_TYPE = ModelType.YOLO
-#MODEL_TYPE = ModelType.UNET
+#MODEL_TYPE = ModelType.YOLO
+MODEL_TYPE = ModelType.UNET
 
 #Set the filepath (for saving and loading)
 if(MODEL_TYPE == ModelType.YOLO):
@@ -194,7 +194,11 @@ VALIDATION_SPLIT_PCT = 0.05
 #TODO: USE DIFFERENT SEGMENTS OF WATER...
 #Class List - Updated to segment water into different sizes for better results
 #I would like to expand this model to a three class problem instead of one
-CLASS_LIST = ("Lake","River")
+
+if(MODEL_TYPE == ModelType.YOLO):
+  CLASS_LIST = ("Lake","River")
+else:
+  CLASS_LIST = ("Nothing","Lake","River")
 class_mapping = dict(zip(range(len(CLASS_LIST)), CLASS_LIST))
 
 #Number of classes in this problem. Though we're looking at water vs. not water, we're really just looking for water, so, one class.
@@ -263,9 +267,9 @@ def load_image(image_path, channels):
     image = tf.io.read_file(image_path)
     image = tf.image.decode_jpeg(image, channels=channels)
 
-    #TODO: RESTORE THIS LATER FOR UNET SEG!
-    #Resize the image to the correct file size
-    #image = tf.image.resize(image, (FILESIZE, FILESIZE), method="bilinear")
+    #if(MODEL_TYPE == ModelType.UNET):
+      #Resize the image to the correct file size
+      #image = tf.image.resize(image, (FILESIZE, FILESIZE), method="nearest")
 
     return image
 
@@ -277,6 +281,13 @@ def load_seg_data(image_path, mask_path):
 
   #Load the mask for the base image (1 channel, grey)
   mask = load_image(mask_path, 1)
+
+  #TODO: DOES THIS PROPERLY RESIZE SEG IMG?
+  #Resizing for all images
+  img_resizer = keras.layers.Resizing(height=FILESIZE, width=FILESIZE, interpolation="bilinear")
+  mask_resizer = keras.layers.Resizing(height=FILESIZE, width=FILESIZE, interpolation="nearest")
+  image = img_resizer(image)
+  mask = mask_resizer(mask)
 
   return {"images": tf.cast(image, tf.float32), "segmentation_masks": tf.cast(mask, tf.float32)}
 
@@ -509,6 +520,119 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
   # axis-aligned bounding box
   intersection_area = (x_right - x_left) * (y_bottom - y_top)
   return intersection_area
+
+
+#Gets the segmentation metrics
+#y_pred - The predicted values from the model
+#y_actual - The actual values from the model
+#specific_class - If looking for a specific class
+#metric_type - The type of metric to get
+def get_seg_metrics_class(y_pred, y_actual, specific_class, metric_type):
+
+  #Get the maximum prediction index (e.g. 0 if index 0 has the highest prediction of the <class count> predictions
+  # Gets the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
+  y_max = np.argmax(y_pred, -1, keepdims=True)
+
+  #Get the: 0 - number of indices, 1 - height of image ground truth, 2 - width of image ground truth,
+  instances = y_actual.shape[0]
+  shape_x = y_actual.shape[1]
+  shape_y = y_actual.shape[2]
+
+  #Counters
+  correct_predictions = 0
+  true_positives = 0                #The index is X and the prediction is X (or for class, the index is X and the prediction is X)
+  true_negatives = 0                #The index is 0 and the prediction is 0 (or for class, the index is Y and the prediction is Y)
+  false_positives = 0               #The index is 0 and the prediction is X (or for class, the index is Y and the prediction is X)
+  false_negatives = 0               #The index is X and the prediction is 0 (or for class, the index is X and the prediction is Y)
+  correct_predictions = 0           #The number of correct predictions
+  incorrect_predictions = 0         #The number of incorrect predictions
+  classified_as_positive = 0        #Everything classified classified as positive
+  all_predictions = 0               #This could be calculated from array shape, but, number of predictions. Need to count it bc of specific class counting predictions.
+
+  #For each image index...
+  for instance_idx in range(0, instances):
+
+    #Get the current actual image data (of [gt index],[x_val],[y_val],[pred_index])
+    #Note: pred_index is not typical format. It's usually 3 predictions. We got the predicted index using argmax
+    #   of the three predictions, which returned the index of the highest prediction 0-<class count>
+    curr_y_act = y_actual[instance_idx]
+    curr_y_pred = y_pred[instance_idx]        
+
+    #For each x pixel index
+    for pixel_idx_x in range(0, shape_x):
+
+      #For each y pixel index
+      for pixel_idx_y in range(0, shape_y):
+
+        #Get the actual vs. predicted index
+        index_actual = curr_y_act[pixel_idx_x][pixel_idx_y][0]
+        index_pred = curr_y_pred[pixel_idx_x][pixel_idx_y][0]
+
+        #Add to total predictions
+        all_predictions += 1
+
+        #If getting states for all classes, just have general TP,TN,FP,FN results
+        if(specific_class == -1):
+
+          #If classified, then, add to classified positives
+          if(index_pred > 0):
+              classified_as_positive += 1
+
+          #If the pixel is wrong, record an incorrect prediction. Otherwise, record a correct prediction
+          if(index_pred == index_actual):
+            correct_predictions += 1
+            if(index_actual == 0):
+              true_negatives += 1
+            else:
+              true_positives += 1
+          else:
+            incorrect_predictions += 1
+            if(index_actual == 0):
+              false_positives += 1
+            else:
+              if(index_pred == 0):
+                false_negatives += 1
+        
+        #Otherwise, comparison will be any other class than the current class 
+        else:
+
+          #True positive
+          if(index_actual == specific_class and index_pred == specific_class):
+            true_positives += 1
+            correct_predictions += 1
+
+          #True negative
+          elif(index_actual != specific_class and index_pred != specific_class):
+            true_negatives += 1
+            correct_predictions += 1
+
+          #False negative
+          elif(index_actual == specific_class and index_actual != specific_class):
+            false_negatives += 1
+            incorrect_predictions += 1
+
+          #False positive
+          elif(index_actual != specific_class and index_pred == specific_class):
+            false_positives += 1
+            incorrect_predictions += 1
+
+  #Get metrics
+  accuracy = correct_predictions / all_predictions
+  recall = true_positives / (true_positives + false_negatives)
+  precision = true_positives / (true_positives + false_positives)
+  f1_score = 2 * ((precision * recall) / (precision + recall))
+
+  #Return the correct metric
+  if(metric_type == MetricType.PIXELACCURACY):
+    return accuracy
+  elif(metric_type == MetricType.PIXELPRECISION):
+    return precision
+  elif(metric_type == MetricType.PIXELRECALL):
+    return recall
+  elif(metric_type == MetricType.PIXELDICE):
+    return f1_score
+  else:
+    return 0.0
 
 
 
@@ -815,7 +939,7 @@ def output_metrics_per_class(y_pred,y_actual):
     #Output metrics for segmentation
     else:
 
-      #TODO: PSEUDOCODE FOR SEMANTIC SEGMENTATION...
+      
       
       #Clear log register:
       log_messages = []
@@ -1156,7 +1280,6 @@ def get_augmentation_layers(file_size, class_count):
     if(AUGMENTATION_RANDOM_ROTATION):
       layers.append(keras_cv.layers.RandomRotation(factor=(0.0,1.0),bounding_box_format="xyxy", segmentation_classes=class_count))
 
-    #TODO: ADDED FOR TESTING
     layers.append(keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy"))
 
   else:
@@ -1167,6 +1290,10 @@ def get_augmentation_layers(file_size, class_count):
       layers.append(keras_cv.layers.RandomFlip(mode="vertical"))
     if(AUGMENTATION_RANDOM_ROTATION):
       layers.append(keras_cv.layers.RandomRotation(factor=(0.0,1.0), segmentation_classes=class_count))
+
+    #TODO: MAKE SURE THIS WORKS WITH SEMANTIC SEG
+    layers.append(keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True))
+
   if(AUGMENTATION_RANDOM_GAUSSIAN_BLUR):
     layers.append(keras_cv.layers.RandomGaussianBlur(kernel_size=3,factor=(0.0,0.1)))
   if(AUGMENTATION_RANDOM_COLORJITTER):
@@ -1198,7 +1325,7 @@ mask_full_paths = []
 ####
 
 #Select image files from all files
-for genericFile in (os.listdir(image_data_path)):
+for genericFile in sorted(os.listdir(image_data_path)):
   name, fileExtension = os.path.splitext(genericFile)
   if fileExtension == ".jpg" or fileExtension == ".jpeg":
     img_full_paths.append(image_data_path + genericFile)
@@ -1206,7 +1333,7 @@ for genericFile in (os.listdir(image_data_path)):
 #Only load mask paths if using semantic segmentation. YOLO uses bounding boxes instead.
 if(MODEL_TYPE == ModelType.UNET):
   #Select mask files from all files
-  for genericFile in (os.listdir(image_data_path)):
+  for genericFile in sorted(os.listdir(image_data_path)):
     name, fileExtension = os.path.splitext(genericFile)
     if fileExtension == ".png":
       mask_full_paths.append(image_data_path + genericFile)
@@ -1268,7 +1395,7 @@ else:
   val_ds = val_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
   test_ds = test_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
 
-
+  resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True)
 
 train_ds = train_ds.shuffle(BATCH_SIZE * 4)
 train_ds = train_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
@@ -1278,16 +1405,16 @@ train_ds = train_ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
 val_ds = val_ds.shuffle(BATCH_SIZE * 4)
 val_ds = val_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
 
-if(MODEL_TYPE == ModelType.YOLO):
-  val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
+#if(MODEL_TYPE == ModelType.YOLO):
+val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
 #Load testing data
 testing_len = len(test_data)
 test_ds = test_ds.shuffle(testing_len)
 test_ds = test_ds.ragged_batch(testing_len, drop_remainder=False)
 
-if(MODEL_TYPE == ModelType.YOLO):
-  test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
+#if(MODEL_TYPE == ModelType.YOLO):
+test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
 
 #Choose the optimizer
@@ -1344,6 +1471,7 @@ else:
       print("Processing Testing Images...")
       images, y_actual = next(iter(dataset.take(1)))
 
+
       #Get predicted
       y_pred = model.predict(images)
       
@@ -1367,21 +1495,44 @@ else:
       #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
       #Outputs the metrics per class:
       output_metrics_per_class(y_pred, y_actual)
+      
+      print("y_actual_shape = " + str(y_actual.shape[0]) + "," + str(y_actual.shape[1]) + "," + str(y_actual.shape[2]) + "," + str(y_actual.shape[3]))
+      print("y_pred_shape = "  + str(y_pred.shape[0]) + "," + str(y_pred.shape[1]) + "," + str(y_pred.shape[2]) + "," + str(y_pred.shape[3]))
 
-      #Note - rows / columns 
-      visualization.plot_bounding_box_gallery(
-          images,
-          value_range=(0, 255),
-          bounding_box_format=bounding_box_format,
+
+      if(MODEL_TYPE == ModelType.YOLO):
+
+        #Visualization for YOLO
+        visualization.plot_bounding_box_gallery(
+            images,
+            value_range=(0, 255),
+            bounding_box_format=bounding_box_format,
+            y_true=y_actual,
+            y_pred=y_pred,
+            scale=1,
+            rows=5,
+            cols=5,
+            show=True,
+            font_scale=1,
+            class_mapping=class_mapping,
+        )
+      else:
+
+        #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
+        y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
+
+        print("y_pred_max_shape = "  + str(y_pred_max.shape[0]) + "," + str(y_pred_max.shape[1]) + "," + str(y_pred_max.shape[2]) + "," + str(y_pred_max.shape[3]))
+
+        #Visualization for semantic segmentation
+        visualization.plot_segmentation_mask_gallery(
+          images=images,
+          y_pred=y_pred_max,
           y_true=y_actual,
-          y_pred=y_pred,
-          scale=1,
+          value_range=(0,255),
+          num_classes=class_count,
           rows=5,
-          cols=5,
-          show=True,
-          font_scale=1,
-          class_mapping=class_mapping,
-      )
+          cols=5
+        )
 
   #Test data count
   print("Test data count = " + str(len(test_ds)))
