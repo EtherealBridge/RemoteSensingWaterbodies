@@ -67,6 +67,7 @@ import os                                     #For image processing and listing 
 class ModelType(Enum):
   YOLO = 0
   UNET = 1
+  BOTH = 2
 
 #Different optimizer options
 class Optimizer(Enum):
@@ -120,12 +121,12 @@ class CycleType(Enum):
 #Application mode
 #Mode.TRAIN - For training a new model. Saves to the model name set
 #Mode.DEMO - Once the model is trained, for getting image selections and predictions
-#MODE = Mode.TRAIN
-MODE = Mode.DEMO
+MODE = Mode.TRAIN
+#MODE = Mode.DEMO
 
 #Select the specific model type - YOLO (bounding box segmentation) or U-NET Xception-Like Model
-#MODEL_TYPE = ModelType.YOLO
-MODEL_TYPE = ModelType.UNET
+MODEL_TYPE = ModelType.YOLO
+#MODEL_TYPE = ModelType.UNET
 
 #Set the filepath (for saving and loading)
 if(MODEL_TYPE == ModelType.YOLO):
@@ -135,6 +136,10 @@ else:
 csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"
 metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"
 bounding_box_annotations_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/annotations/_annotations.csv"
+
+#The output mask and output annotation file for using a combination of segmentation and YOLO
+output_masks = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/output_masks/"
+output_mask_annotation_file = output_masks + "_annotations.csv"
 
 if(MODEL_TYPE == ModelType.YOLO):
   image_data_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/yolo_images/"
@@ -552,6 +557,8 @@ def get_seg_metrics_class(y_pred, y_actual, specific_class, metric_type):
   #For each image index...
   for instance_idx in range(0, instances):
 
+    print("Processing Image " + str(instance_idx))
+
     #Get the current actual image data (of [gt index],[x_val],[y_val],[pred_index])
     #Note: pred_index is not typical format. It's usually 3 predictions. We got the predicted index using argmax
     #   of the three predictions, which returned the index of the highest prediction 0-<class count>
@@ -758,31 +765,39 @@ def get_yolo_metrics_class_box(y_pred, y_actual, specific_class, metric_type, io
     #For either the complete number of predicted classe or the complete number of actual boxes) 
     for box_local_index in range(0, number_of_loops):
 
-      #If still within bounds of the actual class count (because predicted box count can be > actual count)
-      if(box_local_index < actual_class_count):
+      #Initialize actual and predicted class, where -1 means it's invalid
+      y_actual_class = -1
+      y_predicted_class = -1
 
+      #If still within bounds of the actual class count (because predicted box count can be > actual count) set the actual class
+      if(box_local_index < actual_class_count):
+        
         #Given the box local index (the index of a given box - actual, on ONE IMAGE - remember this is a sub loop inside a loop by image result)
         y_actual_class = img_actual_classes_np[box_local_index]
 
-        #If still within bounds of the predicted class count (because actual box count can be > predicted box count)
-        if(box_local_index < predicted_class_count):    
+      #If still within bounds of the predicted class count (because actual box count can be > predicted box count) set the predicted class
+      if(box_local_index < predicted_class_count):  
+          
+        #Given the box local index (the index of a given box - predicted, on ONE IMAGE - remember this is a sub loop inside a loop by image result)
+        y_predicted_class = img_predicted_classes_np[box_local_index]
 
-          #Given the box local index (the index of a given box - predicted, on ONE IMAGE - remember this is a sub loop inside a loop by image result)
-          y_predicted_class = img_predicted_classes_np[box_local_index]
+      if(y_actual_class > -1 and y_predicted_class > -1 and y_actual_class == y_predicted_class):
+        total_correct_class_classifications += 1
 
-          if(y_actual_class == y_predicted_class):
-            total_correct_class_classifications += 1
+      
+
+          
 
   #If total predicted classes is zero, just return`` metric value as zero to avoid divide-by-zero error
-  if(total_predicted_classes == 0.0 or total_positive_box_ious == 0.0 or total_actual_boxes == 0.0 or total_predicted_classes == 0.0 or
-     total_predicted_boxes == 0):
+  if(total_predicted_classes == 0 or total_positive_box_ious == 0 or total_actual_boxes == 0 or
+     total_predicted_boxes == 0 or total_actual_classes == 0 or total_iou_instances == 0):
     return 0.0
 
   #Calculate metrics...
   class_accuracy = total_correct_class_classifications / total_predicted_classes
   box_accuracy = total_positive_box_ious / total_iou_instances
-  class_recall = total_correct_class_classifications / total_actual_boxes
-  box_recall = total_predicted_boxes / total_actual_boxes
+  class_recall = total_correct_class_classifications / total_actual_classes
+  box_recall = total_positive_box_ious / total_actual_boxes
   class_precision = total_correct_class_classifications / total_predicted_classes
   box_precision = total_positive_box_ious / total_predicted_boxes
 
@@ -819,7 +834,7 @@ def get_yolo_metrics_class_box(y_pred, y_actual, specific_class, metric_type, io
       return class_precision
 
   #Number of correct box predictions out of all predicted box positive values (predictions made with IoU > threshold)
-  #TP / (TP + FN)
+  #TP / (TP + FP)
   elif(metric_type == MetricType.BOXPRECISION):
     return box_precision
 
@@ -936,13 +951,26 @@ def output_metrics_per_class(y_pred,y_actual):
       #Clear log register:
       log_messages = []
 
-    #Output metrics for segmentation
-    else:
+  #Output metrics for segmentation
+  else:
 
+    #Get metrics for everything
+    write_log(-1, "Metrics: Predicted vs. empty")
+
+    #For each class
+    for class_index in range(1, class_count):
+      class_name = CLASS_LIST[class_index]
+      accuracy = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELACCURACY)
+      log_messages.append("Class [" + class_name + "] Class Accuracy = " + str(accuracy))
+      recall = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELRECALL)
+      log_messages.append("Class [" + class_name + "] Class Recall = " + str(recall))
+      precision = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELPRECISION)
+      log_messages.append("Class [" + class_name + "] Class Precision = " + str(precision))
+      f1_score = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELDICE)
+      log_messages.append("Class [" + class_name + "] Class Dice = " + str(f1_score))
       
-      
-      #Clear log register:
-      log_messages = []
+    #Clear log register:
+    log_messages = []
 
 #Given y_predicted values and y_actual values, calculate the IOU
 #y_pred - The predicted values
@@ -1099,7 +1127,7 @@ def seg_train_model(train_ds, val_ds):
                     keras.metrics.MeanIoU(num_classes=class_count, name="pixel_miou", sparse_y_true=True, sparse_y_pred=False)]
   
   #Compile the model
-  seg_model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy", metrics=metrics)
+  seg_model.compile(optimizer=OPTIMIZER, loss="sparse_categorical_crossentropy", metrics=metrics)
 
   #https://keras.io/examples/vision/oxford_pets_image_segmentation/
 
@@ -1142,7 +1170,7 @@ def yolo_train_model(train_ds, val_ds):
   #Compile the model
   #https://keras.io/examples/vision/yolov8/
   yolo.compile(
-      optimizer=optimizer, classification_loss="binary_crossentropy", box_loss="ciou"
+      optimizer=OPTIMIZER, classification_loss="binary_crossentropy", box_loss="ciou"
   )
 
   #Run the training loop for the model
@@ -1303,6 +1331,77 @@ def get_augmentation_layers(file_size, class_count):
   augmenter = keras.Sequential(layers)
   return augmenter
 
+
+#https://keras.io/examples/vision/yolov8/
+def visualize_detections(model, dataset, bounding_box_format):
+
+  #Load the images and either classes / bounding boxes, or prediction images
+  print("Processing Testing Images...")
+  images, y_actual = next(iter(dataset.take(1)))
+
+
+  #Get predicted
+  y_pred = model.predict(images, batch_size=BATCH_SIZE)
+
+  #Output count of boxes
+  print("Prediction Count = " + str(len(y_pred)))
+  print("Actual Annotation Count = " + str(len(y_actual)))
+
+  #Get and display the number of images
+  num_images = len(images)
+  print("There are " + str(num_images) + "images")
+
+
+  if(MODEL_TYPE == ModelType.YOLO):
+    print("Calculating total iou...")
+
+    #Calculate the total IOU for predicted vs. actual
+    iou = calculate_iou(y_pred, y_actual)
+    avg_iou_str = "TESTING - IOU = " + str(iou)
+    write_log("Testing", avg_iou_str)
+
+  #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
+  #Outputs the metrics per class:
+  output_metrics_per_class(y_pred, y_actual)
+  
+  #print("y_actual_shape = " + str(y_actual.shape[0]) + "," + str(y_actual.shape[1]) + "," + str(y_actual.shape[2]) + "," + str(y_actual.shape[3]))
+  #print("y_pred_shape = "  + str(y_pred.shape[0]) + "," + str(y_pred.shape[1]) + "," + str(y_pred.shape[2]) + "," + str(y_pred.shape[3]))
+
+
+  if(MODEL_TYPE == ModelType.YOLO):
+
+    #Visualization for YOLO
+    visualization.plot_bounding_box_gallery(
+        images,
+        value_range=(0, 255),
+        bounding_box_format=bounding_box_format,
+        y_true=y_actual,
+        y_pred=y_pred,
+        scale=1,
+        rows=5,
+        cols=5,
+        show=True,
+        font_scale=1,
+        class_mapping=class_mapping,
+    )
+  else:
+
+    #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
+    y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
+
+    print("y_pred_max_shape = "  + str(y_pred_max.shape[0]) + "," + str(y_pred_max.shape[1]) + "," + str(y_pred_max.shape[2]) + "," + str(y_pred_max.shape[3]))
+
+    #Visualization for semantic segmentation
+    visualization.plot_segmentation_mask_gallery(
+      images=images[:25],
+      y_pred=y_pred_max,
+      y_true=y_actual,
+      value_range=(0,255),
+      num_classes=class_count,
+      rows=5,
+      cols=5
+    )
+
 #Print the starting message
 def start_message():
   #Put start message in logs
@@ -1310,233 +1409,170 @@ def start_message():
   logstr = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') + " --- STARTED!"
   write_log(-1, logstr)
 
-#-----------------------------------#
-# Entry Point - Where the code actually starts doing stuff...
-#-----------------------------------#
+#Start process - either trains or tests
+def start(model_type):
 
-#Print the script starting message
-start_message()
+  #-----------------------------------#
+  # Entry Point - Where the code actually starts doing stuff...
+  #-----------------------------------#
 
-img_full_paths = []
-mask_full_paths = []
+  #Print the script starting message
+  start_message()
 
-####
-#Image Loading / Processing
-####
+  img_full_paths = []
+  mask_full_paths = []
 
-#Select image files from all files
-for genericFile in sorted(os.listdir(image_data_path)):
-  name, fileExtension = os.path.splitext(genericFile)
-  if fileExtension == ".jpg" or fileExtension == ".jpeg":
-    img_full_paths.append(image_data_path + genericFile)
+  ####
+  #Image Loading / Processing
+  ####
 
-#Only load mask paths if using semantic segmentation. YOLO uses bounding boxes instead.
-if(MODEL_TYPE == ModelType.UNET):
-  #Select mask files from all files
+  #Select image files from all files
   for genericFile in sorted(os.listdir(image_data_path)):
     name, fileExtension = os.path.splitext(genericFile)
-    if fileExtension == ".png":
-      mask_full_paths.append(image_data_path + genericFile)
+    if fileExtension == ".jpg" or fileExtension == ".jpeg":
+      img_full_paths.append(image_data_path + genericFile)
 
-#Get count of training data
-all_img_count = len(img_full_paths)
-write_log(-1, "Total Images = " + str(all_img_count))
+  #Only load mask paths if using semantic segmentation. YOLO uses bounding boxes instead.
+  if(model_type == ModelType.UNET):
+    #Select mask files from all files
+    for genericFile in sorted(os.listdir(image_data_path)):
+      name, fileExtension = os.path.splitext(genericFile)
+      if fileExtension == ".png":
+        mask_full_paths.append(image_data_path + genericFile)
 
-#Show mask count if loading masks from file
-if(MODEL_TYPE == ModelType.UNET):
-  all_mask_count = len(mask_full_paths)
-  write_log(-1, "Total Masks = " + str(mask_full_paths))
+  #Get count of training data
+  all_img_count = len(img_full_paths)
+  write_log(-1, "Total Images = " + str(all_img_count))
 
-#Special note: Training data is [TRAINING_DATA_PCT] of the image set data. Images will be
-# SHUFFLED every training data set by using random.shuffle(x)
-test_data_count = int(all_img_count * TEST_DATA_PCT)
-training_img_count = int(all_img_count * (1.0 - TEST_DATA_PCT))
+  #Show mask count if loading masks from file
+  if(model_type == ModelType.UNET):
+    all_mask_count = len(mask_full_paths)
+    write_log(-1, "Total Masks = " + str(mask_full_paths))
 
-#Get dataset to use based on the current model type YOLO, U-NET, etc.
-if(MODEL_TYPE == ModelType.YOLO):
-  data = prepare_yolo_data(img_full_paths)
-else:
-  data = prepare_seg_data(img_full_paths, mask_full_paths)
+  #Special note: Training data is [TRAINING_DATA_PCT] of the image set data. Images will be
+  # SHUFFLED every training data set by using random.shuffle(x)
+  test_data_count = int(all_img_count * TEST_DATA_PCT)
+  training_img_count = int(all_img_count * (1.0 - TEST_DATA_PCT))
 
-# Split the dataset into train and validation sets
-test_data = data.take(test_data_count)
-
-#Get the rest of the data that is not test data in this instance
-rest_of_data = data.skip(test_data_count)
-
-#Get validation size
-validation_size = int(len(rest_of_data) * VALIDATION_SPLIT_PCT)
-val_data = rest_of_data.take(validation_size)
-train_data = rest_of_data.skip(validation_size)
-
-print("Testing Data Size = " + str(len(test_data)))
-print("Training Data Size = " + str(len(train_data)))
-print("Validation Data Size = " + str(len(val_data)))
-
-#Get augmentation layers for Keras models
-augmenter = get_augmentation_layers(FILESIZE, class_count)
-
-####
-# Dataset Creation
-####
-#Load training data
-#load_dataset - loads either the YOLO or UNet dataset based on the current model selected
-#https://keras.io/examples/vision/yolov8/
-if(MODEL_TYPE == ModelType.YOLO):
-  train_ds = train_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-  val_ds = val_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-  test_ds = test_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-  
-  #Function that resizes image to FILESIZExFILESIZE coordinates with bilinear filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
-  resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
-  
-else:
-  train_ds = train_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-  val_ds = val_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-  test_ds = test_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-
-  resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True)
-
-train_ds = train_ds.shuffle(BATCH_SIZE * 4)
-train_ds = train_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
-train_ds = train_ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
-
-#Load validation data
-val_ds = val_ds.shuffle(BATCH_SIZE * 4)
-val_ds = val_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
-
-#if(MODEL_TYPE == ModelType.YOLO):
-val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
-
-#Load testing data
-testing_len = len(test_data)
-test_ds = test_ds.shuffle(testing_len)
-test_ds = test_ds.ragged_batch(testing_len, drop_remainder=False)
-
-#if(MODEL_TYPE == ModelType.YOLO):
-test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
-
-
-#Choose the optimizer
-#https://keras.io/examples/vision/yolov8/
-if(OPTIMIZER == Optimizer.ADAM):
-  optimizer = tf.keras.optimizers.Adam(
-    learning_rate=LEARNING_RATE,
-    global_clipnorm=GLOBAL_CLIPNORM,
-    weight_decay = WEIGHT_DECAY,
-    epsilon=1e-07,
-  )
-elif(OPTIMIZER == Optimizer.RMSPROP):
-  optimizer = tf.keras.optimizers.RMSprop(
-    learning_rate=LEARNING_RATE,
-    global_clipnorm=GLOBAL_CLIPNORM,
-    weight_decay = WEIGHT_DECAY,
-    epsilon=1e-07,
-  ) 
-
-#Map conversion from dictionary to image/bounding bix tuple for YOLO
-if(MODEL_TYPE == ModelType.YOLO):
-  #https://keras.io/examples/vision/yolov8/
-  train_ds = train_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-  val_ds = val_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-  test_ds = test_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-else:
-  train_ds = train_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-  val_ds = val_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-  test_ds = test_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-
-#Perform data prefetch
-train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
-
-#Select the correct backbone for training. Unfortunately, only YOLOv8 modes work at the moment.
-if(MODE == Mode.TRAIN):
-
-  #If this is a YOLO model, then
-  if(MODEL_TYPE == ModelType.YOLO):
-    yolo_train_model(train_ds, val_ds)     
+  #Get dataset to use based on the current model type YOLO, U-NET, etc.
+  if(model_type == ModelType.YOLO):
+    data = prepare_yolo_data(img_full_paths)
   else:
-    seg_train_model(train_ds, val_ds)
+    data = prepare_seg_data(img_full_paths, mask_full_paths)
 
-else:
-   
-  #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
-  loaded_model = keras.saving.load_model(model_path)
+  # Split the dataset into train and validation sets
+  test_data = data.take(test_data_count)
 
+  #Get the rest of the data that is not test data in this instance
+  rest_of_data = data.skip(test_data_count)
+
+  #Get validation size
+  validation_size = int(len(rest_of_data) * VALIDATION_SPLIT_PCT)
+  val_data = rest_of_data.take(validation_size)
+  train_data = rest_of_data.skip(validation_size)
+
+  print("Testing Data Size = " + str(len(test_data)))
+  print("Training Data Size = " + str(len(train_data)))
+  print("Validation Data Size = " + str(len(val_data)))
+
+  #Get augmentation layers for Keras models
+  augmenter = get_augmentation_layers(FILESIZE, class_count)
+
+  ####
+  # Dataset Creation
+  ####
+  #Load training data
+  #load_dataset - loads either the YOLO or UNet dataset based on the current model selected
   #https://keras.io/examples/vision/yolov8/
-  def visualize_detections(model, dataset, bounding_box_format):
+  if(model_type == ModelType.YOLO):
+    train_ds = train_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
+    test_ds = test_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    #Function that resizes image to FILESIZExFILESIZE coordinates with bilinear filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
+    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
+    
+  else:
+    train_ds = train_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
+    test_ds = test_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
 
-      #Load the images and either classes / bounding boxes, or prediction images
-      print("Processing Testing Images...")
-      images, y_actual = next(iter(dataset.take(1)))
+    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True)
 
+  train_ds = train_ds.shuffle(BATCH_SIZE * 4)
+  train_ds = train_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
+  train_ds = train_ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
 
-      #Get predicted
-      y_pred = model.predict(images)
-      
-      #Output count of boxes
-      print("Prediction Count = " + str(len(y_pred)))
-      print("Actual Annotation Count = " + str(len(y_actual)))
+  #Load validation data
+  val_ds = val_ds.shuffle(BATCH_SIZE * 4)
+  val_ds = val_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
 
-      #Get and display the number of images
-      num_images = len(images)
-      print("There are " + str(num_images) + "images")
+  val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
+  #Load testing data
+  testing_len = len(test_data)
+  test_ds = test_ds.shuffle(testing_len)
+  test_ds = test_ds.ragged_batch(testing_len, drop_remainder=False)
 
-      if(MODEL_TYPE == ModelType.YOLO):
-        print("Calculating total iou...")
-
-        #Calculate the total IOU for predicted vs. actual
-        iou = calculate_iou(y_pred, y_actual)
-        avg_iou_str = "TESTING - IOU = " + str(iou)
-        write_log("Testing", avg_iou_str)
-
-      #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
-      #Outputs the metrics per class:
-      output_metrics_per_class(y_pred, y_actual)
-      
-      print("y_actual_shape = " + str(y_actual.shape[0]) + "," + str(y_actual.shape[1]) + "," + str(y_actual.shape[2]) + "," + str(y_actual.shape[3]))
-      print("y_pred_shape = "  + str(y_pred.shape[0]) + "," + str(y_pred.shape[1]) + "," + str(y_pred.shape[2]) + "," + str(y_pred.shape[3]))
+  test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
 
 
-      if(MODEL_TYPE == ModelType.YOLO):
+  #Choose the optimizer
+  #https://keras.io/examples/vision/yolov8/
+  if(OPTIMIZER == Optimizer.ADAM):
+    optimizer = tf.keras.optimizers.Adam(
+      learning_rate=LEARNING_RATE,
+      global_clipnorm=GLOBAL_CLIPNORM,
+      weight_decay = WEIGHT_DECAY,
+      epsilon=1e-07,
+    )
+  elif(OPTIMIZER == Optimizer.RMSPROP):
+    optimizer = tf.keras.optimizers.RMSprop(
+      learning_rate=LEARNING_RATE,
+      global_clipnorm=GLOBAL_CLIPNORM,
+      weight_decay = WEIGHT_DECAY,
+      epsilon=1e-07,
+    ) 
 
-        #Visualization for YOLO
-        visualization.plot_bounding_box_gallery(
-            images,
-            value_range=(0, 255),
-            bounding_box_format=bounding_box_format,
-            y_true=y_actual,
-            y_pred=y_pred,
-            scale=1,
-            rows=5,
-            cols=5,
-            show=True,
-            font_scale=1,
-            class_mapping=class_mapping,
-        )
-      else:
+  #Map conversion from dictionary to image/bounding bix tuple for YOLO
+  if(model_type == ModelType.YOLO):
+    #https://keras.io/examples/vision/yolov8/
+    train_ds = train_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+    test_ds = test_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+  else:
+    train_ds = train_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+    test_ds = test_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
 
-        #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
-        y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
+  #Perform data prefetch
 
-        print("y_pred_max_shape = "  + str(y_pred_max.shape[0]) + "," + str(y_pred_max.shape[1]) + "," + str(y_pred_max.shape[2]) + "," + str(y_pred_max.shape[3]))
+  if(MODE == CycleType.TRAINING):
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+  else:
+    test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
 
-        #Visualization for semantic segmentation
-        visualization.plot_segmentation_mask_gallery(
-          images=images,
-          y_pred=y_pred_max,
-          y_true=y_actual,
-          value_range=(0,255),
-          num_classes=class_count,
-          rows=5,
-          cols=5
-        )
+  #Select the correct backbone for training. Unfortunately, only YOLOv8 modes work at the moment.
+  if(MODE == Mode.TRAIN):
 
-  #Test data count
-  print("Test data count = " + str(len(test_ds)))
+    #If this is a YOLO model, then
+    if(model_type == ModelType.YOLO):
+      yolo_train_model(train_ds, val_ds)     
+    else:
+      seg_train_model(train_ds, val_ds)
 
-  #TODO - LOAD IMAGES IN DIFFERENT WAY? - ALSO CAUSING METRICS TO BE INCORRECT
-  #Run evaluation loop
-  visualize_detections(loaded_model, dataset=test_ds, bounding_box_format="xyxy")
+  else:
+    
+    #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
+    loaded_model = keras.saving.load_model(model_path)    
+
+    #Test data count
+    print("Test data count = " + str(len(test_ds)))
+
+    #TODO - LOAD IMAGES IN DIFFERENT WAY? - ALSO CAUSING METRICS TO BE INCORRECT
+    #Run evaluation loop
+    visualize_detections(loaded_model, dataset=test_ds, bounding_box_format="xyxy")
+
+#START
+start(MODEL_TYPE)   #Train on YOLO
