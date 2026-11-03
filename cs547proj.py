@@ -154,8 +154,8 @@ MODE = Mode.DEMO
 
 #Select the specific model type - YOLO (bounding box segmentation) or U-NET Xception-Like Model
 #MODEL_TYPE = ModelType.YOLO
-MODEL_TYPE = ModelType.UNET
-#MODEL_TYPE = ModelType.YOLO_SEG
+#MODEL_TYPE = ModelType.UNET
+MODEL_TYPE = ModelType.YOLO_SEG
 
 #The size of the YOLO model used...
 #MODEL_SIZE = ModelSize.Small
@@ -167,7 +167,7 @@ MODEL_SIZE = ModelSize.Medium
 OPTION_SAVE_SEG_IMAGES = False
 
 #If true, will calculate metrics and save them to file. If false, will skip this step all together
-OPTION_CALCULATE_METRICS = False
+OPTION_CALCULATE_METRICS = True
 
 #If true, will show the correct output images. If false, will not. Skipping showing the output images will just cause the skip to run and end without a break from the image viewer.
 OPTION_SHOW_OUTPUT_IMAGES = True
@@ -368,26 +368,10 @@ def write_file(epoch, logstr, file_path):
   except Exception as e:
       print("Could not write epoch to file : " + str(epoch))
 
-#Get the metric file path from the metric type and cycle type
-#model_type - The type of model being run
-#metric_type - Type of metric used (type of MetricType)
-#cycle_type - What cycle is this in? Training? Validation? Testing?
-#iou (Optional) - If this metric file is for a specific IoU threshold. If set to -1, is ignored
-def get_metric_file_path(model_type, metric_type, cycle_type):
-
-  #Base path where all metric logs get saved to...
-  metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"
-  
-  model = "yolo_"
-  if(model_type == ModelType.UNET):
-      model = "unet_"
-    
-  prefix = "training_"
-  if(cycle_type == CycleType.VALIDATION):
-    prefix="validation_"
-  if(cycle_type == CycleType.TESTING):
-    prefix="testing_"
-
+#Gets the string descriptor for a metric type
+#metric_type - The metric type to get the descriptor for
+#returns - The label for a metric type (e.g. box_accuracy_)
+def get_metric_type_descriptor(metric_type):
   descriptor = "total_iou_"
   if(metric_type == MetricType.AVGIOU):
     descriptor = "avg_iou_"
@@ -415,6 +399,57 @@ def get_metric_file_path(model_type, metric_type, cycle_type):
     descriptor = "box_dice_"
   elif (metric_type == MetricType.PIXELDICE):
     descriptor = "pixel_dice_"
+  return descriptor
+
+
+#Gets the string descriptor for a cycle type (e.g. training, validation, testing)
+#cycle_type - The cycle type to get the descriptor for, type of CycleType
+#returns - The label for a metric type (e.g. training_)
+def get_cycle_type_descriptor(cycle_type):
+
+  if(cycle_type == CycleType.TRAINING):
+    return "training_"
+  elif(cycle_type == CycleType.VALIDATION):
+    return "validation_"
+  else:
+    return "testing_"
+
+
+#Gets the string descriptor for a model type (e.g. training_ or testing_)
+#model_type - The model type, type of ModelType
+#returns - The label for a model type (e.g. training_)
+def get_model_type_descriptor(model_type):
+  if(model_type == ModelType.YOLO):
+    return "yolo_"
+  elif(model_type == ModelType.UNET):
+    return "unet_"
+  else:
+    return "yolo_seg"
+
+  
+    
+
+    
+
+#Get the metric file path from the metric type and cycle type
+#model_type - The type of model being run
+#metric_type - Type of metric used (type of MetricType)
+#cycle_type - What cycle is this in? Training? Validation? Testing?
+#iou (Optional) - If this metric file is for a specific IoU threshold. If set to -1, is ignored
+def get_metric_file_path(model_type, metric_type, cycle_type):
+
+  #Base path where all metric logs get saved to...
+  #metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"
+  metric_base_path = "C:\\Phee\\Class\\Capstone\\metrics\\"
+
+  #Get the descriptive value of the model type (yolo, unet, or yoloseg)
+  model = get_model_type_descriptor(model_type)
+
+  #Get the prefix for the current cycle being run (training, validation, or testing)
+  prefix = get_cycle_type_descriptor(cycle_type)
+
+  #Get the descriptive label for the given metric type (e.g. class accuracy, box accuracy, etc.)
+  descriptor = get_metric_type_descriptor(metric_type)
 
   return metric_base_path + model + prefix + descriptor + ".csv"
 
@@ -433,12 +468,14 @@ def write_metric(epoch, metric_type, cycle_type, metric_val, iou=-1.0):
   #Write to file
   write_file(epoch, str(metric_type) + "," + str(cycle_type) + "," + str(iou) + "," + str(metric_val), metric_file_path)
 
-
 #Writes the log to file with the correct epoch.
 #epoch - The current epoch if applicable. Otherwise set as -1
 #logstr - The log string to write to file
 def write_log(epoch, logstr):
-  csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"
+
+  csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"   #LINUX
+  #csv_path = "C:\\Phee\\Class\\Capstone\\logs\\output.csv"                              #WIN
+
   write_file(epoch, logstr, csv_path)
   print("epoch: " + str(epoch) + " ::: " + logstr)
 
@@ -577,6 +614,139 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
   # axis-aligned bounding box
   intersection_area = (x_right - x_left) * (y_bottom - y_top)
   return intersection_area
+
+
+#Can the given pixel navigate to the center of the given bounding box, using the mask as a nav mesh?
+def can_nav_to_center_of_box():
+
+#Can the given pixel navigate to at least one point on the given bounding box, using the mask as a nav mesh?
+def can_nav_to_box():
+
+
+#Gets the yolo bounding box that is matched to the given pixel coordinate. 
+#x - The pixel x coordinate
+#y - The pixel y coordinate
+#yolo_boxes - The collection of yolo boxes here. Can be either predicted or actual boxes
+def get_matched_box_to_pixel(x,y, yolo_boxes):
+
+
+def determine_yoloseg_class():
+  
+def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes)
+
+  
+
+#Get the given metric for the combined models (Yolo-Seg)
+#yolo_y_pred - The YOLO y predicted values
+#yolo_y_actual - The YOLO y actual values
+#unet_y_pred - The unet y predicted values
+#unet_y_actual - The unet y actual values
+#metric_type - The desired metric type
+#returns - The calculated metric determined by the provided metric_type
+def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, metric_type):
+
+  #Make sure a predicted class is used for the unet prediction. Any class that is not nothing will just be "on" in this case
+  unet_y_pred = np.argmax(unet_y_pred, -1, keepdims=True)
+
+  #The predicted classes and boxes, where, each index is locked to the image index, and has an array of the classes and boxes, index-locked
+  yolo_y_pred_classes = yolo_y_pred["classes"]
+  yolo_y_pred_classes_np = keras.ops.convert_to_numpy(yolo_y_pred_classes)
+  yolo_y_pred_boxes = yolo_y_pred["boxes"]
+  yolo_y_pred_boxes_np = keras.ops.convert_to_numpy(yolo_y_pred_boxes)
+
+  #Get the actual classes and boxes, which are packed into an array per index
+  yolo_y_actual_classes = yolo_y_actual["classes"]
+  yolo_y_actual_classes_np = keras.ops.convert_to_numpy(yolo_y_actual_classes)
+  yolo_y_actual_boxes = yolo_y_actual["boxes"]
+  yolo_y_actual_boxes_np = keras.ops.convert_to_numpy(yolo_y_actual_boxes)
+
+  #Get actual pixel shape to march through in loop. Typically x and y dims will always be 512 and 512. Inst
+  img_count = unet_y_actual.shape[0]
+  shape_x = unet_y_actual.shape[1]
+  shape_y = unet_y_actual.shape[2]
+
+  #Convert dictionaries to simple numpy jagged arrays
+  unet_y_pred_np = keras.ops.convert_to_numpy(unet_y_pred.to_numpy)
+  unet_y_act_np = keras.ops.convert_to_numpy(unet_y_actual.to_numpy)
+
+  #seg_metrics  - TP, FP, TN, FN for jsut segmentation (water vs. not water)
+  true_positives = 0
+  false_positives = 0
+  true_negatives = 0
+  false_negatives = 0
+
+  #overall metrics - still mostly segmentation
+  total_pixels = (img_count * shape_x * shape_y)
+  total_true_water_pixels = 0
+  total_pred_water_pixels = 0
+
+  #Total number of yolo_seg pixels that have both a correct water pixel classification AND a correct yolo classification
+  yolo_seg_pixels_correct = 0
+
+  #Calculated ONLY on predicted water pixels. When water is predicted, the total number of yolo segmentation classifications that are actually correct
+  #   This will help determine, if the segmentation is correct, if the YOLO object detection is also correct.
+  #   Will also help determine which is more accurate - segmentation or object detection here
+  yolo_seg_object_detections_correct = 0
+
+  #The number of object detections only (only runs on predicted water pixels)
+  yolo_seg_total_object_detections = 0
+
+  #For each image in the image list
+  for img_index in range(0, img_count):
+
+    #Get the boxes for this image
+
+
+    #For each x (horizontal) pixel
+    for x in range(0, shape_x):
+
+      #For each y (vertical) pixel
+      for y in range(0, shape_y):
+
+        #Get the actual pixel in this position. is it water?
+        act_pixel = unet_y_act_np[img_index,x,y]
+        is_actual_water = (act_pixel > 0)
+
+        #Get the predicted pixel and actual pixel at this point (x,y) for an image...
+        pred_pixel = unet_y_pred_np[img_index,x,y]
+        is_pred_water = (pred_pixel > 0)
+
+        #If the predicted pixel is water and the actual pixel is water, then see if a class can be assigned
+        #Potential true positive / true positive for segmentation
+        
+        if(is_actual_water):
+          total_true_water_pixels += 1
+          if(is_pred_water):
+            true_positives += 1
+            total_pred_water_pixels += 1
+          else:
+            false_negatives += 1            
+
+        #Water is not actually here in the ground truth images
+        else:
+          if(is_pred_water):
+            false_positives += 1
+            total_pred_water_pixels += 1
+          else:
+            true_negatives += 1
+
+        #If water is predicted at all, then, run object detection on the water to get the class for it
+        if(is_pred_water):
+
+          #Gets the predicted classes and boxes for this image
+          img_pred_classes = yolo_y_pred_classes_np[img_index]
+          img_pred_boxes = yolo_y_pred_boxes_np[img_index]
+
+          #Gets the actual classes and boxes for this image
+          img_act_classes = yolo_y_actual_classes_np[img_index]
+          img_act_boxes = yolo_y_actual_boxes_np[img_index]
+
+            
+          
+
+
+          
+
 
 
 #Gets the segmentation metrics
@@ -836,10 +1006,6 @@ def get_yolo_metrics_class_box(y_pred, y_actual, specific_class, metric_type, io
       if(y_actual_class > -1 and y_predicted_class > -1 and y_actual_class == y_predicted_class):
         total_correct_class_classifications += 1
 
-      
-
-          
-
   #If total predicted classes is zero, just return`` metric value as zero to avoid divide-by-zero error
   if(total_predicted_classes == 0 or total_positive_box_ious == 0 or total_actual_boxes == 0 or
      total_predicted_boxes == 0 or total_actual_classes == 0 or total_iou_instances == 0):
@@ -1010,7 +1176,6 @@ def fetch_data(model_type, data, cycle_type, all_img_count):
 #file_size - The file size to resize images to
 #model_type - The type of model being loaded. Valid selections are YOLO or UNET
 def get_augmentation_layers(class_count, model_type):
-
   
   ####
   #Data Augmentation - Random Image Flips, Random Resizing
@@ -1048,128 +1213,91 @@ def get_augmentation_layers(class_count, model_type):
   augmenter = keras.Sequential(layers)
   return augmenter
 
+#Output YOLO-SEG metrics to explore the viability of the entire model
+def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual):
+
+
+
+#Outputs the current unet metrics for a given class (or -1 for ALL. 0 is ignored because that's just background)
+#y_pred - The Y Predicted values for UNET
+#y_actual - The Y Actual values for UNET
+#specific_class - The specific class to get metrics for. -1 Means ALL 
+#curr_class_metric_type - The pixel metric used 
+def output_unet_metrics_per_class(y_pred, y_actual, specific_class, curr_pixel_metric_type):
+  step_str = "Overall "
+  if(specific_class != -1):
+    step_str = "Class [" + CLASS_LIST[specific_class + 1] + "]"   #Add 1 because unet has a "nothing" class as class 0, where as class 0 for YOLO is "Lake"
+  pixel_metric = get_seg_metrics_class(y_pred, y_actual, specific_class, curr_pixel_metric_type)
+  write_log(-1, step_str + get_metric_type_descriptor(curr_pixel_metric_type) + str(pixel_metric))
+  write_metric(specific_class, curr_pixel_metric_type, CycleType.TESTING, pixel_metric)
+
+#Outputs the current yolo metrics
+#y_pred - The Y Predicted values for YOLO
+#y_actual - The Y Actual values for YOLO
+#specific_class - The specific class to get metrics for. -1 Means ALL
+#curr_class_metric_type - The current CLASS metric type for YOLO
+#curr_box_metric_type - The current BOX metric type for YOLO
+def output_yolo_metrics_per_class(y_pred, y_actual, specific_class, curr_class_metric_type, curr_box_metric_type):
+
+  #IoU Amouts to use as thresholds
+  iou_thresholds = [0.5, 0.95]
+
+  #For each IoU threshold, create a distinct report - only done for YOLO or YOLO seg
+  for iou_threshold in iou_thresholds:
+    class_metric = get_yolo_metrics_class_box(y_pred, y_actual, -1, curr_class_metric_type, iou_threshold)
+    box_metric = get_yolo_metrics_class_box(y_pred, y_actual, -1, curr_box_metric_type, iou_threshold)
+    step_str = "Overall "
+    if(specific_class != -1):
+      step_str = "Class [" + CLASS_LIST[specific_class] + "]"
+    write_log(-1, step_str + get_metric_type_descriptor(curr_class_metric_type) + " [IoU=" + str(iou_threshold) + ")] = " + str(class_metric))
+    write_log(-1, step_str + get_metric_type_descriptor(curr_box_metric_type) + "[IoU=" + str(iou_threshold) + ")] = " + str(box_metric))
+    write_metric(specific_class, curr_class_metric_type, CycleType.TESTING, class_metric, iou_threshold)
+    write_metric(specific_class, curr_box_metric_type, CycleType.TESTING, box_metric, iou_threshold)
+
+
 #logs the actual precision and recall per class
 #model_type - The type of model to make predictions for...
 #y_pred - The y predicted values (from the model)
 #y_actual - The actual ground truth values
-def output_metrics_per_class(model_type, y_pred,y_actual):
+#yolo_y_pred - The YOLO y predicted values if using yolo seg
+#yolo_y_actual - The YOLO y actual values if using yolo seg
+#unet_y_pred - The UNET y predicted values if using yolo seg
+#unet_y_actual - The UNET y actual values if using yolo seg
+def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yolo_y_actual = None, unet_y_pred = None, unet_y_actual = None):
 
   #Messages to write to the log / print out to the console
   log_messages = []
 
-  #Get overall class metrics
-  if(model_type == ModelType.YOLO):
+  #Classes to use. -1 is All, 0 is lakes, 1 is rivers
+  class_indices = [-1, 0, 1]
 
-    #IoU Amouts to use as thresholds
-    iou_thresholds = [0.5, 0.95]
+  #Get the class and box metrics to be updated in the loop below (for general model and per class)
+  class_metrics = [MetricType.CLASSACCURACY, MetricType.CLASSPRECISION, MetricType.CLASSRECALL, MetricType.CLASSF1]
+  box_metrics = [MetricType.BOXACCURACY, MetricType.BOXPRECISION, MetricType.BOXRECALL, MetricType.BOXDICE]
+  seg_metrics = [MetricType.PIXELACCURACY, MetricType.PIXELPRECISION, MetricType.PIXELRECALL, MetricType.PIXELDICE]
 
-    #For each IoU threshold, create a distinct report
-    for iou_threshold in iou_thresholds:
+  #For each class index, starting with "All" and then going into specific classes,
+  for class_index in class_indices:
+
+    #For each metric type...
+    for metric_index in range(0, len(class_metrics)):
+
+      curr_class_metric_type = class_metrics[metric_index]
+      curr_box_metric_type = box_metrics[metric_index]
+      curr_pixel_metric_type = seg_metrics[metric_index]
+
+      #If this is YOLO testing, then
+      if(model_type == ModelType.YOLO):
+        output_yolo_metrics_per_class(y_pred, y_actual, class_index, curr_class_metric_type, curr_box_metric_type)        
+      #For UNET testing only
+      elif(model_type == ModelType.UNET):
+        curr_pixel_metric_type = seg_metrics[metric_index]
+        output_unet_metrics_per_class(y_pred, y_actual, class_index, curr_pixel_metric_type)
+
+      #For YOLO-SEG testing
+      else:
+
         
-      class_overall_accuracy = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.CLASSACCURACY, iou_threshold)
-      box_overall_accuracy = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.BOXACCURACY, iou_threshold)
-      log_messages.append("Overall Class Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(class_overall_accuracy))
-      log_messages.append("Overall Box Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(box_overall_accuracy))
-      write_metric(-1, MetricType.CLASSACCURACY, CycleType.TESTING, class_overall_accuracy, iou_threshold)
-      write_metric(-1, MetricType.BOXACCURACY, CycleType.TESTING, box_overall_accuracy, iou_threshold)
-
-      class_overall_precision = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.CLASSPRECISION, iou_threshold)
-      box_overall_precision = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.BOXPRECISION, iou_threshold)
-      log_messages.append("Overall Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(class_overall_precision))
-      log_messages.append("Overall Box Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(box_overall_precision))
-      write_metric(-1, MetricType.CLASSPRECISION, CycleType.TESTING, class_overall_precision, iou_threshold)
-      write_metric(-1, MetricType.BOXPRECISION, CycleType.TESTING, box_overall_precision, iou_threshold)
-
-      class_overall_recall = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.CLASSRECALL, iou_threshold)
-      box_overall_recall = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.BOXRECALL, iou_threshold)
-      log_messages.append("Overall lass Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(class_overall_recall))
-      log_messages.append("Overall Box Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(box_overall_recall))
-      write_metric(-1, MetricType.CLASSRECALL, CycleType.TESTING, class_overall_recall, iou_threshold)
-      write_metric(-1, MetricType.BOXRECALL, CycleType.TESTING, box_overall_recall, iou_threshold)
-
-      class_overall_f1 = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.CLASSF1, iou_threshold)
-      box_overall_f1 = get_yolo_metrics_class_box(y_pred, y_actual, -1, MetricType.BOXDICE, iou_threshold)
-      log_messages.append("Overall Class Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(class_overall_f1))
-      log_messages.append("Overall Box Accuracy [IoU=" + str(iou_threshold) + ")] = " + str(box_overall_f1))
-      write_metric(-1, MetricType.CLASSF1, CycleType.TESTING, class_overall_f1, iou_threshold)
-      write_metric(-1, MetricType.BOXDICE, CycleType.TESTING, box_overall_f1, iou_threshold)
-
-      #Dump all metrics messages to log
-      for log_message in log_messages:
-        write_log(-1, log_message)
-          
-      #Reset log register
-      log_messages = []
-
-    for class_index in range(0, class_count):
-      class_name = CLASS_LIST[class_index]
-
-      class_iou = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.AVGIOU, 0.5)
-      write_metric(class_index, MetricType.AVGIOU, CycleType.TESTING, class_iou, 0.0)
-      log_messages.append("Class [" + class_name + "] IoU=" + str(class_iou))
-
-      #For each IoU threshold, create a distinct report
-      for iou_threshold in iou_thresholds:
-        
-        #Accuracy metrics
-        class_accuracy = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.CLASSACCURACY, iou_threshold)
-        box_accuracy = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.BOXACCURACY, iou_threshold)
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Class Accuracy = " + str(class_accuracy))
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Box Accuracy = " + str(box_accuracy))
-        write_metric(class_index, MetricType.CLASSACCURACY, CycleType.TESTING, class_accuracy, iou_threshold)
-        write_metric(class_index, MetricType.BOXACCURACY, CycleType.TESTING, box_accuracy, iou_threshold)
-
-        #Precision metrics
-        class_precision = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.CLASSPRECISION, iou_threshold)
-        box_precision = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.BOXPRECISION, iou_threshold)
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Class Precision = " + str(class_precision))
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Box Precision = " + str(box_precision))
-        write_metric(class_index, MetricType.CLASSPRECISION, CycleType.TESTING, class_precision, iou_threshold)
-        write_metric(class_index, MetricType.BOXPRECISION, CycleType.TESTING, box_precision, iou_threshold)
-
-        #Recall metrics
-        class_recall = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.CLASSRECALL, iou_threshold)
-        box_recall = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.BOXRECALL, iou_threshold)
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Class Recall = " + str(class_recall))
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Box Recall = " + str(box_recall))
-        write_metric(class_index, MetricType.CLASSRECALL, CycleType.TESTING, class_recall, iou_threshold)
-        write_metric(class_index, MetricType.BOXRECALL, CycleType.TESTING, box_recall, iou_threshold)
-
-        #F1 Metrics
-        class_f1 = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.CLASSF1, iou_threshold)
-        box_f1 = get_yolo_metrics_class_box(y_pred, y_actual, class_index, MetricType.BOXDICE, iou_threshold)
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Class Recall = " + str(class_f1))
-        log_messages.append("IoU=[" + str(iou_threshold) + "] Class [" + class_name + "] Box Dice = " + str(box_f1))
-        write_metric(class_index, MetricType.CLASSF1, CycleType.TESTING, class_f1, iou_threshold)
-        write_metric(class_index, MetricType.BOXDICE, CycleType.TESTING, box_f1, iou_threshold)
-
-        #Dump all metrics messages to log
-        for log_message in log_messages:
-          write_log(-1, log_message)
-
-      #Clear log register:
-      log_messages = []
-
-  #Output metrics for segmentation
-  else:
-
-    #Get metrics for everything
-    write_log(-1, "Metrics: Predicted vs. empty")
-
-    #For each class
-    for class_index in range(1, class_count):
-      class_name = CLASS_LIST[class_index]
-      accuracy = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELACCURACY)
-      log_messages.append("Class [" + class_name + "] Class Accuracy = " + str(accuracy))
-      recall = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELRECALL)
-      log_messages.append("Class [" + class_name + "] Class Recall = " + str(recall))
-      precision = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELPRECISION)
-      log_messages.append("Class [" + class_name + "] Class Precision = " + str(precision))
-      f1_score = get_seg_metrics_class(y_pred, y_actual, class_index, MetricType.PIXELDICE)
-      log_messages.append("Class [" + class_name + "] Class Dice = " + str(f1_score))
-      
-    #Clear log register:
-    log_messages = []
 
 #Given y_predicted values and y_actual values, calculate the IOU
 #y_pred - The predicted values
@@ -1588,19 +1716,25 @@ def get_predicted_data(model_type, dataset):
 #bounding_box_format - For YOLO, the bounding box format. Usually xyxy
 #all_img_count - The number of images in the dataset...
 #no_metrics - If true, will not show calculate or show metrics
-def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics):
+#yolo_dataset - Optional - If using yolo seg, the YOLO dataset
+#set_dataset - Optional - If using yolo seg, the segmentation dataset
+def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics, yolo_dataset = None, seg_dataset = None):
 
-
-  #Fetch data for the requested cycle type
-  #Get test image paths - get test data selection so that we can get the paths from it
-  img_path_data = get_dataset(data, cycle_type, all_img_count)
-  img_paths = get_paths_from_dataset(img_path_data, model_type, ImageDataType.RGB)
 
   #YOLO-Seg gets predictions for both YOLO and UNet Segmentation. The other two run independently for testing each.
   if(model_type == ModelType.YOLO_SEG):
 
+    #Get YOLO image paths
+    yolo_img_path_data = get_dataset(yolo_dataset, cycle_type, all_img_count)
+    yolo_img_paths = get_paths_from_dataset(yolo_img_path_data, ModelType.YOLO, ImageDataType.RGB)
+
+    #Get Seg image paths
+    seg_img_path_data = get_dataset(seg_dataset, cycle_type, all_img_count)
+    seg_img_paths = get_paths_from_dataset(seg_img_path_data, ModelType.UNET, ImageDataType.RGB)
+
+
     #Get the YOLO data to use for making predictions...
-    yolo_ds = fetch_data(ModelType.YOLO, data, cycle_type, all_img_count)
+    yolo_ds = fetch_data(ModelType.YOLO, yolo_dataset, cycle_type, all_img_count)
 
     #Get predictions for yolo
     yolo_y_pred = get_predicted_data(ModelType.YOLO, yolo_ds)
@@ -1608,20 +1742,25 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
     #Load the images and either classes / bounding boxes, or prediction images
     #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
     print("Processing YOLO Testing Images...")
-    images, y_actual = next(iter(ds.take(1)))
+    yolo_images, yolo_y_actual = next(iter(yolo_ds.take(1)))
 
     #Get the UNET data to use for making predictions...
-    unet_ds = fetch_data(ModelType.UNET, data, cycle_type, all_img_count)
+    unet_ds = fetch_data(ModelType.UNET, seg_dataset, cycle_type, all_img_count)
 
     #Load the images and either classes / bounding boxes, or prediction images
     #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
     print("Processing UNET Testing Images...")
-    unet_images, unet_y_actual = next(iter(ds.take(1)))
+    unet_images, unet_y_actual = next(iter(unet_ds.take(1)))
 
     #Get predictions for UNET
     unet_y_pred = get_predicted_data(ModelType.UNET, unet_ds)
     
   else:
+
+    #Fetch data for the requested cycle type
+    #Get test image paths - get test data selection so that we can get the paths from it
+    img_path_data = get_dataset(data, cycle_type, all_img_count)
+    img_paths = get_paths_from_dataset(img_path_data, model_type, ImageDataType.RGB)
 
     #Get the datasource to use for making predictions...
     ds = fetch_data(model_type, data, cycle_type, all_img_count)
@@ -1631,13 +1770,19 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
 
     #Get the predicted data for the given model type if it's for individual yolo or unet
     y_pred = get_predicted_data(model_type, ds)
-  
+
+  #Gets the the total segmentation and yolo prediction count - 
+  # If individual, only one will have values
+  # If YOLO seg, both will have values
   segmentation_prediction_count = 0
   yolo_prediction_count = 0 
   if(model_type == ModelType.YOLO):
     yolo_prediction_count = y_pred["boxes"].shape[0]
   elif(model_type == ModelType.UNET):
     segmentation_prediction_count = y_pred.shape[0]
+  else:
+    yolo_prediction_count = yolo_y_pred["boxes"].shape[0]
+    segmentation_prediction_count = unet_y_pred.shape[0]
 
   #If this is a segmentation test save the segmentation images so that we can run YOLO on it next for the classification...
   if(model_type == ModelType.UNET):
@@ -1654,26 +1799,29 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
   print("YOLO Prediction Count = " + str(yolo_prediction_count))
   print("UNET Prediction Count = " + str(segmentation_prediction_count))
 
-  #Get and display the number of images
-  num_images = len(images)
-  print("There are " + str(num_images) + " images in this dataset...")
+  if(model_type == ModelType.YOLO_SEG):
+    yolo_image_count = len(yolo_images)
+    seg_image_count = len(unet_images)
+    total_image_count = yolo_image_count + seg_image_count
+    print("Total Images: " + str(total_image_count))
+    print("YOLO Images: " + str(yolo_image_count))
+    print("UNET Images: " + str(seg_image_count))
+  else:
+    #Get and display the number of images
+    num_images = len(images)
+    print("There are " + str(num_images) + " images in this dataset...")
 
   #If true, will calculate and show the metrics. If false, will do neither and skip this step all together
   if(OPTION_CALCULATE_METRICS and no_metrics==False):
 
-    #Output metrics for YOLO, segmentation, or both
-    if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
-      #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
-      output_metrics_per_class(ModelType.YOLO, yolo_y_pred, y_actual)   #YOLO Metrics Out
-
-    elif(model_type == ModelType.UNET or model_type == ModelType.YOLO_SEG):
-      output_metrics_per_class(ModelType.UNET, unet_y_pred, y_actual)   #UNET Metrics Out
+    #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
+    output_metrics_per_class(model_type, yolo_y_pred, y_actual)   #YOLO Metrics Out
       
   #If we are showing the output images then...
   if(OPTION_SHOW_OUTPUT_IMAGES and no_metrics==False):
 
       #If this model type is yolo, then, show yolo images
-      if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
+      if(model_type == ModelType.YOLO):
 
         #Visualization for YOLO
         visualization.plot_bounding_box_gallery(
@@ -1690,7 +1838,7 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
         )
 
       #If this is image segmentation, then...
-      else:
+      elif(model_type == ModelType.UNET):
 
         #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
         y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
@@ -1761,7 +1909,9 @@ def prepare_yolo_data(mask_full_paths):
   #3 - WHEN FOUND, USE THOSE BOUNDING BOXES 
 
   # Read the entire content of the bounding box file
-  bounding_box_annotations_path = "/home/chrissy/Documents/School/CS547/AIStuff/TestYOLO/_annotations.csv"
+  bounding_box_annotations_path = "/home/chrissy/Documents/School/CS547/AIStuff/TestYOLO/_annotations.csv"   #LINUX
+  #bounding_box_annotations_path = "C:\\Phee\\Class\\Capstone\\img\\yolo\\_annotations.csv"    #WIN
+  
   lines = read_text_file(bounding_box_annotations_path)
 
   #Create temp class list
@@ -1790,7 +1940,10 @@ def prepare_yolo_data(mask_full_paths):
 
       #Get the unique file descriptor that is not a guid or file extension to match seg images with yolo images
       #Include the slash in front as to make sure is a starts with check for the file name
-      actual_file_descriptor = "/" + file_parts[0]
+      
+      
+      actual_file_descriptor = "/" + file_parts[0]       #LINUX - REMEMBER TO CHANGE THIS BACK!
+      #actual_file_descriptor = "\\" + file_parts[0]       #WIN
 
       #Get the class name
       classname = vals[3]
@@ -1870,18 +2023,25 @@ def get_path(path_type, model_type, yolo_training_source = YOLOTrainingSource.Or
 
   #Gets the model checkpoint path for image segmentation
   if(path_type == PathType.CHECKPOINT):
-    return "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/seg_chk.keras"
+    return "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/seg_chk.keras"  #LINUX
+    #return "C:\\Phee\\Class\\Capstone\\seg_chk.keras"                                     #WIN
 
   #Set the filepath (for saving and loading)
-  yolo_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/TestYOLO/model.keras"
-  unet_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/unet.keras"
+  yolo_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/TestYOLO/model.keras"        #LINUX
+  unet_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/unet.keras"  #LINUX
+
+  #yolo_model_path = "C:\\Phee\\Class\\Capstone\\model.keras"                                    #WIN
+  #unet_model_path = "C:\\Phee\\Class\\Capstone\\unet.keras"                                     #WIN
 
   #Get correct image paths...
   if(yolo_training_source == YOLOTrainingSource.PrefabMasks or yolo_training_source == YOLOTrainingSource.OriginalImages):
-    yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"
+    yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"   #LINUX
+    #yolo_img_path ="C:\\Phee\\Class\\Capstone\\img\\yolo\\"                              #WIN
   else:
-    yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/output_masks/"
-  seg_img_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"
+    yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/output_masks/" #LINUX
+    #yolo_img_path = "C:\\Phee\\Class\\Capstone\\img\\yolo\\"                              #WIN
+  seg_img_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"     #LINUX
+  #seg_img_path = "C:\\Phee\\Class\\Capstone\\img\\seg\\"                                  #WIN
 
   #Set the paths per model to return...
   if(model_type == ModelType.YOLO):
@@ -2008,27 +2168,29 @@ def start(model_type):
   if(model_type == ModelType.YOLO_SEG):
     yolo_data = prepare_data(ModelType.YOLO)
     seg_data = prepare_data(ModelType.UNET)
+
+    #Get yolo training and validation data
+    # yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
+    # yolo_val_ds = fetch_data(model_type, yolo_data, CycleType.VALIDATION, all_img_count)
+
+    # #Get segmentation training and validation data
+    # seg_train_ds = fetch_data(model_type, seg_data, CycleType.TRAINING, all_img_count)
+    # seg_val_ds = fetch_data(model_type, seg_data, CycleType.VALIDATION, all_img_count)
+
+    
   else:
     data = prepare_data(model_type)
 
-    if(model_type == ModelType.YOLO_SEG):
-
-      #Get yolo training and validation data
-      yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
-      yolo_val_ds = fetch_data(model_type, yolo_data, CycleType.VALIDATION, all_img_count)
-
-      #Get segmentation training and validation data
-      seg_train_ds = fetch_data(model_type, seg_data, CycleType.TRAINING, all_img_count)
-      seg_val_ds = fetch_data(model_type, seg_data, CycleType.VALIDATION, all_img_count)
-
-    else:
-      #Fetch training, validation, and testing data
-      train_ds = fetch_data(model_type, data, CycleType.TRAINING, all_img_count)
-      val_ds = fetch_data(model_type, data, CycleType.VALIDATION, all_img_count)
+    #Fetch training, validation, and testing data
+    train_ds = fetch_data(model_type, data, CycleType.TRAINING, all_img_count)
+    val_ds = fetch_data(model_type, data, CycleType.VALIDATION, all_img_count)
 
   # #Show training images that the YOLO model was trained on...
   if(OPTION_SHOW_TRAINING_IMAGE_GALLERY and MODE == Mode.DEMO):
     if(model_type == ModelType.YOLO_SEG):
+
+      #Get only yolo data and show that...
+      yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
       visualize_training_data(yolo_train_ds, bounding_box_format="xyxy")
     else:
       visualize_training_data(train_ds, bounding_box_format="xyxy")
@@ -2045,25 +2207,16 @@ def start(model_type):
   else:
 
     #Model type is Yolo-Segmentation
-    #Model type used is NOT YoloSeg then
     if(model_type == ModelType.YOLO_SEG):
 
-      #Get testing data for both YOLO and unet
-      write_log(-1, "Fetching data...")
-      yolo_test_ds = fetch_data(model_type, data, CycleType.TESTING, all_img_count)
-      unet_test_ds = fetch_data(model_type, data, CycleType.TESTING, all_img_count)
-
       #Get index-locked predictions for both yolo and unet data sets
-      write_log("Getting predictions on datasets...")
-      do_testing(ModelType.YOLO_SEG, data, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False)
+      write_log(-1, "Getting predictions on datasets...")
+      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data)
 
-      #TODO: DO TESTING HERE. MAY DONT USE do_testing? WRITE OWN AND USE THAT?
 
     else:
   
-
-      #TODO - LOAD IMAGES IN DIFFERENT WAY? - ALSO CAUSING METRICS TO BE INCORRECT
-      #Run evaluation loop
+      #Run evaluation loop for single model type - mostly for developing both models for YOLO seg
       do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False)
 
       #If outputting full test and validation image set for u-net, do that as well
@@ -2073,12 +2226,12 @@ def start(model_type):
           #This part runs when we're generating masks to save to file. Not used because the results were worse...
           print("Also Generating Training and Validation Masks for UNet... to Send to YOLO")
 
-          val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
-          val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
+          #val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
+          #val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
           do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
 
-          train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
-          train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
+          #train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
+          #train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
           do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
 
       
