@@ -107,16 +107,10 @@ class ImageColorChannelMode(Enum):
   GREYSCALE = 1
   RGBA = 2
 
-#Different optimizer options
-class Optimizer(Enum):
-  ADAM = 0
-  RMSPROP = 1
-
 #Should this code run training or the demo?
 class Mode(Enum):
-  TRAIN = 0,
-  LOADANDTRAIN = 1,
-  DEMO = 2,
+  TRAIN = 0
+  DEMO = 1
 
 #IOU Metric Types
 class MetricType(Enum):
@@ -906,19 +900,124 @@ def get_yolo_metrics_class_box(y_pred, y_actual, specific_class, metric_type, io
   else:
      return 0.0
 
+#Get the desired dataset (by its cycle type)
+#data - The data to get the sub dataset from
+#cycle-type - The current cycle data desired (training, validation, testing)
+#all_img_count - The total number of images in the dataset
+def get_dataset(data, cycle_type, all_img_count):
+
+  #Splits off the test data and the train/val data as two distinct chunks. Then further splits train and validation data from the train/val chunk.
+  #Get test data count
+  #Special note: Training data is [TRAINING_DATA_PCT] of the image set data. Images will be
+  # SHUFFLED every training data set by using random.shuffle(x)
+  test_data_count = int(all_img_count * TEST_DATA_PCT)
+
+  # Split the dataset into train and validation sets
+  test_data = data.take(test_data_count)
+
+  #Get the rest of the data that is not test data in this instance
+  rest_of_data = data.skip(test_data_count)
+
+  #Get validation size
+  validation_size = int(len(rest_of_data) * VALIDATION_SPLIT_PCT)
+
+  #If training, then
+  val_data = rest_of_data.take(validation_size)
+  train_data = rest_of_data.skip(validation_size)
+
+  #Return the desired data
+  if(cycle_type == CycleType.TRAINING):
+    return train_data
+  elif(cycle_type == CycleType.VALIDATION):
+    return val_data
+  else:
+    return test_data
+
+
+#Fetches data for training, validation, or testing cycles from their given datasets
+#model_type - The type of model (YOLO, UNET) that is currently being used
+#cycle_type - The current cycle (training, validation, testing) to get data for
+#all_img_count - The total number of images in the dataset
+def fetch_data(model_type, data, cycle_type, all_img_count):
+
+  #Get the training, validation, or testing dataset
+  ds = get_dataset(data, cycle_type, all_img_count)
+
+  data_len = len(ds)
+  len_ds_str = str(data_len)
+  if(cycle_type == CycleType.TRAINING):
+    print("Training Data Size = " + len_ds_str)
+  elif(cycle_type == CycleType.VALIDATION):
+    print("Validation Data Size = " + len_ds_str)
+  else:
+    print("Testing Data Size = " + len_ds_str)
+
+  #Get augmentation steps
+  #Get augmentation layers for Keras models
+  augmenter = get_augmentation_layers(class_count, model_type)
+
+  #UNet resizer. Gets replaced by yolo resizer if running yolo
+  resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True)
+
+  ####
+  # Dataset Creation
+  ####
+  #Load training data
+  #load_dataset - loads either the YOLO or UNet dataset based on the current model selected
+  #https://keras.io/examples/vision/yolov8/
+  if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
+
+    ds = ds.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    #Function that resizes image to FILESIZExFILESIZE coordinates with nearest filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
+    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
+    
+  else:
+
+      ds = ds.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
+
+  #Testing data does not get shuffled. Also, get full set of a ragged batch when testing
+  if(cycle_type ==  CycleType.TRAINING or cycle_type == CycleType.VALIDATION):
+    ds = ds.shuffle(BATCH_SIZE * 4)
+    ds = ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
+  else:
+    ds = ds.ragged_batch(data_len, drop_remainder=False)
+
+  #Only run augmentation on training images
+  if(cycle_type == CycleType.TRAINING):
+
+    #Only augment in training
+    ds = ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
+
+  #If not training, them, only map resizer
+  else:
+    ds = ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE);
+
+  #Based on model type, map function to the training dataset that converts to the data dictionary to a tuple format
+  if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
+    ds = ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+  else:
+    ds = ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
+
+  #Prefetch the data for efficiency for all cycle types (Train, Validation, Testing)
+  ds = ds.prefetch(tf.data.AUTOTUNE)
+      
+  return ds
+
 
  
 #Get the data augumentation layers to use for models and return them as a set of augmentation steps
 #file_size - The file size to resize images to
-#class_count - Number of classes to use in this model
-def get_augmentation_layers(class_count):
+#model_type - The type of model being loaded. Valid selections are YOLO or UNET
+def get_augmentation_layers(class_count, model_type):
+
   
   ####
   #Data Augmentation - Random Image Flips, Random Resizing
   ####
   #https://keras.io/examples/vision/yolov8/
   layers = []
-  if(MODEL_TYPE == ModelType.YOLO):
+  if(model_type == ModelType.YOLO):
     #layers.append(keras_cv.layers.Resizing(file_size,file_size,"nearest",pad_to_aspect_ratio=True,bounding_box_format="xyxy"))
     if(AUGMENTATION_FLIP_HORIZONTALLY):
       layers.append(keras_cv.layers.RandomFlip(mode="horizontal", bounding_box_format="xyxy"))
@@ -1451,20 +1550,13 @@ def save_seg_masks(image_paths, y_pred):
           #Purge currently saved pixels to start writing for new image...
           img_pixels = []
 
-#https://keras.io/examples/vision/yolov8/
-def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
-# or MODEL_TYPE == ModelType.YOLO_SEG
 
-#TODO: NEED TO MAKE SURE YOLO AND UNET IMAGES ARE SYNCHRONIZED. CANT HAVE YOLO IMAGES SORTED FOR SOME REASON? - IT BREAKS THE DEMOING. 
-#   HOWEVER, NOT SORTING MEANS WRONG SEG IMAGES TIED TO WRONG MASK IMAGES - MAYBE LINK SEG IMAGES TO THEIR MASKS INSTEAD THROUGH A PROCESS?
-#   DID TESTING BEFORE AND WRONG SEG IMAGES LINKED TO WRONG MASKS IF NOT SORTED
-#   NOTE - ITS ACTUALLY PREDICTING ON THE CORRECT RGB IMAGE. HOWEVER, THE GROUND TRUTH MASK FED IN IS THE WRONG FILE AND IS NOT SYNCHRONIZED TO THE CORRECT RGB FILE.
-
-  if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
+def get_predicted_data(model_type, dataset):
+  if(model_type == ModelType.YOLO):
     #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
     yolo_model_path = get_path(PathType.MODEL, ModelType.YOLO)
     yolo_model = keras.saving.load_model(yolo_model_path)
-  elif(MODEL_TYPE == ModelType.UNET or MODEL_TYPE == ModelType.YOLO_SEG):      
+  elif(model_type == ModelType.UNET):      
     #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
     unet_model_path = get_path(PathType.MODEL, ModelType.UNET)
     unet_model = keras.saving.load_model(unet_model_path)
@@ -1473,25 +1565,86 @@ def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
   #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
   print("Processing Testing Images...")
   images, y_actual = next(iter(dataset.take(1)))
-  
+
   #Get predicted
   yolo_prediction_count = 0
   segmentation_prediction_count = 0
-  if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
+  if(model_type == ModelType.YOLO):
     write_log(-1, "Running YOLO Model Prediction...")
     yolo_y_pred = yolo_model.predict(images, batch_size=BATCH_SIZE)
-    yolo_prediction_count = yolo_y_pred["boxes"].shape[0]
-  elif(MODEL_TYPE == ModelType.UNET or MODEL_TYPE == ModelType.YOLO_SEG):
+    return yolo_y_pred
+
+  else:
     write_log(1, "Running UNet Model Prediction...")
     seg_y_pred = unet_model.predict(images, batch_size=BATCH_SIZE)
-    segmentation_prediction_count = seg_y_pred.shape[0]
+    return seg_y_pred
+
+
+#Run testing cycle after training and validation
+#https://keras.io/examples/vision/yolov8/
+#model_type - The type of model used
+#data - The loaded dataset
+#cycle_type - The cycle of data to do this testing for (training, validation, testing - usually testing unless generating predictions...)
+#bounding_box_format - For YOLO, the bounding box format. Usually xyxy
+#all_img_count - The number of images in the dataset...
+#no_metrics - If true, will not show calculate or show metrics
+def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics):
+
+
+  #Fetch data for the requested cycle type
+  #Get test image paths - get test data selection so that we can get the paths from it
+  img_path_data = get_dataset(data, cycle_type, all_img_count)
+  img_paths = get_paths_from_dataset(img_path_data, model_type, ImageDataType.RGB)
+
+  #YOLO-Seg gets predictions for both YOLO and UNet Segmentation. The other two run independently for testing each.
+  if(model_type == ModelType.YOLO_SEG):
+
+    #Get the YOLO data to use for making predictions...
+    yolo_ds = fetch_data(ModelType.YOLO, data, cycle_type, all_img_count)
+
+    #Get predictions for yolo
+    yolo_y_pred = get_predicted_data(ModelType.YOLO, yolo_ds)
+
+    #Load the images and either classes / bounding boxes, or prediction images
+    #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
+    print("Processing YOLO Testing Images...")
+    images, y_actual = next(iter(ds.take(1)))
+
+    #Get the UNET data to use for making predictions...
+    unet_ds = fetch_data(ModelType.UNET, data, cycle_type, all_img_count)
+
+    #Load the images and either classes / bounding boxes, or prediction images
+    #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
+    print("Processing UNET Testing Images...")
+    unet_images, unet_y_actual = next(iter(ds.take(1)))
+
+    #Get predictions for UNET
+    unet_y_pred = get_predicted_data(ModelType.UNET, unet_ds)
+    
+  else:
+
+    #Get the datasource to use for making predictions...
+    ds = fetch_data(model_type, data, cycle_type, all_img_count)
+
+    #Split simple dataset into images and y_actual
+    images, y_actual = next(iter(ds.take(1)))
+
+    #Get the predicted data for the given model type if it's for individual yolo or unet
+    y_pred = get_predicted_data(model_type, ds)
+  
+  segmentation_prediction_count = 0
+  yolo_prediction_count = 0 
+  if(model_type == ModelType.YOLO):
+    yolo_prediction_count = y_pred["boxes"].shape[0]
+  elif(model_type == ModelType.UNET):
+    segmentation_prediction_count = y_pred.shape[0]
 
   #If this is a segmentation test save the segmentation images so that we can run YOLO on it next for the classification...
-  if(MODEL_TYPE == ModelType.UNET):
+  if(model_type == ModelType.UNET):
       #If saving segmentation images is enabled, then
       if(OPTION_SAVE_SEG_IMAGES):
           #Save the segmentation images
-          save_seg_masks(img_paths, seg_y_pred)
+          save_seg_masks(img_paths, unet_y_pred)
 
   #IF Yolo or UNET only, one of these will be zero. Will still report the correct number of predictions...
   total_pred =  yolo_prediction_count + segmentation_prediction_count
@@ -1505,30 +1658,22 @@ def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
   num_images = len(images)
   print("There are " + str(num_images) + " images in this dataset...")
 
-  # if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
-  #   print("Calculating total iou...")
-
-    #Calculate the total IOU for predicted vs. actual
-    #iou = calculate_iou(y_pred, y_actual)
-    #avg_iou_str = "TESTING - IOU = " + str(iou)
-    #write_log("Testing", avg_iou_str)
-
   #If true, will calculate and show the metrics. If false, will do neither and skip this step all together
   if(OPTION_CALCULATE_METRICS and no_metrics==False):
 
     #Output metrics for YOLO, segmentation, or both
-    if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
+    if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
       #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
       output_metrics_per_class(ModelType.YOLO, yolo_y_pred, y_actual)   #YOLO Metrics Out
 
-    elif(MODEL_TYPE == ModelType.UNET or MODEL_TYPE == ModelType.YOLO_SEG):
-      output_metrics_per_class(ModelType.UNET, seg_y_pred, y_actual)   #UNET Metrics Out
+    elif(model_type == ModelType.UNET or model_type == ModelType.YOLO_SEG):
+      output_metrics_per_class(ModelType.UNET, unet_y_pred, y_actual)   #UNET Metrics Out
       
   #If we are showing the output images then...
   if(OPTION_SHOW_OUTPUT_IMAGES and no_metrics==False):
 
       #If this model type is yolo, then, show yolo images
-      if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
+      if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
 
         #Visualization for YOLO
         visualization.plot_bounding_box_gallery(
@@ -1536,7 +1681,7 @@ def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
             value_range=(0, 255),
             bounding_box_format=bounding_box_format,
             y_true=y_actual,
-            y_pred=yolo_y_pred,
+            y_pred=y_pred,
             scale=1,
             rows=5,
             cols=5,
@@ -1548,7 +1693,7 @@ def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
       else:
 
         #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
-        y_pred_max = np.argmax(seg_y_pred, axis=-1, keepdims=True)
+        y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
 
         #print("y_pred_max_shape = "  + str(y_pred_max.shape[0]) + "," + str(y_pred_max.shape[1]) + "," + str(y_pred_max.shape[2]) + "," + str(y_pred_max.shape[3]))
 
@@ -1562,6 +1707,42 @@ def do_testing(img_paths, dataset, bounding_box_format, no_metrics):
           rows=5,
           cols=5
         )
+
+
+#Given a dataset, loops through and gets the number of paths
+#dataset - The dataset to get the paths from
+#image_data_type - The type of image (ImageDataType) to get from the dataset - RGB data? Masks?'
+#model_type - The type of model to get data for. YOLO and UNet have different data structures. YOLO is [ImgPath, Class, BBox] and UNET is [ImgPath, MaskPath]
+#returns - A list of paths from the given dataset for the given data type
+def get_paths_from_dataset(dataset, model_type, image_data_type):
+
+    #Get image and mask (if desired) paths
+    test_img_paths = []
+    test_mask_paths = []
+
+    if(model_type == ModelType.UNET):
+
+      #Loop through [ImgPath, MaskPath] dictionary
+      for imgpath, maskpath in dataset:
+
+        #For UNet, get the image and mask paths
+        test_img_paths.append(imgpath.numpy().decode("utf-8"))
+        test_mask_paths.append(maskpath.numpy().decode("utf-8"))
+    
+    #Get YOLO image paths only
+    else:
+
+        #Loop through [ImgPath, Classes, BoundingBoxes] dictionary
+        for imgpath, classes, bbox in dataset:
+
+          #Add the YOLO Image path to the list of image paths
+          test_img_paths.append(imgpath.numpy().decode("utf-8"))
+
+    #Based on the desired image data type, return the list of paths
+    if(image_data_type == ImageDataType.RGB):
+      return test_img_paths
+    else:
+      return test_mask_paths
 
     
 #Prepares the YOLO dataset that will be split into training, validation, test  data
@@ -1814,16 +1995,6 @@ def start(model_type):
       write_log("ERROR", "ERROR - INVALID STATE DETECTED! PLEASE CHECK SETTINGS (MODE, MODEL TYPE, ETC) AND TRY AGAIN.")
       return None
 
-  ####
-  #Image Loading / Processing
-  ####
-
-  # #Select mask files from all files
-  # for genericFile in dirdata:
-  #   name, fileExtension = os.path.splitext(genericFile)
-  #   if fileExtension == ".png":
-  #     mask_full_paths.append(image_data_path + genericFile)
-
   #Load the paths for masks and rgb training images
   mask_full_paths = get_image_file_paths(model_type, ImageDataType.MASKS)
   img_full_paths = get_image_file_paths(model_type, ImageDataType.RGB)
@@ -1834,143 +2005,33 @@ def start(model_type):
   write_log(-1, "Total Images = " + str(all_img_count))
   write_log(-1, "Total Masks = " + str(all_mask_count))
 
-  #Get test data count
-  #Special note: Training data is [TRAINING_DATA_PCT] of the image set data. Images will be
-  # SHUFFLED every training data set by using random.shuffle(x)
-  test_data_count = int(all_img_count * TEST_DATA_PCT)
-
   if(model_type == ModelType.YOLO_SEG):
     yolo_data = prepare_data(ModelType.YOLO)
     seg_data = prepare_data(ModelType.UNET)
   else:
     data = prepare_data(model_type)
 
-  # Split the dataset into train and validation sets
-  test_data = data.take(test_data_count)
+    if(model_type == ModelType.YOLO_SEG):
 
-  test_img_paths = []
-  test_mask_paths = []
-  if(MODEL_TYPE == ModelType.UNET):
-    for imgpath, maskpath in test_data:
-      test_img_paths.append(imgpath.numpy().decode("utf-8"))
-      test_mask_paths.append(maskpath.numpy().decode("utf-8"))
-  else:
-    for imgpath, boxes, classes in test_data:
-      test_img_paths.append(imgpath.numpy().decode("utf-8"))
+      #Get yolo training and validation data
+      yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
+      yolo_val_ds = fetch_data(model_type, yolo_data, CycleType.VALIDATION, all_img_count)
 
-  #Get the rest of the data that is not test data in this instance
-  rest_of_data = data.skip(test_data_count)
+      #Get segmentation training and validation data
+      seg_train_ds = fetch_data(model_type, seg_data, CycleType.TRAINING, all_img_count)
+      seg_val_ds = fetch_data(model_type, seg_data, CycleType.VALIDATION, all_img_count)
 
-  #Get validation size
-  validation_size = int(len(rest_of_data) * VALIDATION_SPLIT_PCT)
+    else:
+      #Fetch training, validation, and testing data
+      train_ds = fetch_data(model_type, data, CycleType.TRAINING, all_img_count)
+      val_ds = fetch_data(model_type, data, CycleType.VALIDATION, all_img_count)
 
-  #If training, then
-  val_data = rest_of_data.take(validation_size)
-  train_data = rest_of_data.skip(validation_size)
-  print("Training Data Size = " + str(len(train_data)))
-  print("Validation Data Size = " + str(len(val_data)))
-
-  train_img_paths = []
-  val_img_paths = []    
-
-  #Fill val data paths and train data paths
-  if(MODEL_TYPE == ModelType.UNET):
-    for imgpath, maskpath in train_data:
-      train_img_paths.append(imgpath.numpy().decode("utf-8"))
-  else:
-    for imgpath, boxes, classes in train_data:
-      train_img_paths.append(imgpath.numpy().decode("utf-8"))
-  if(MODEL_TYPE == ModelType.UNET):
-    for imgpath, maskpath in val_data:
-      val_img_paths.append(imgpath.numpy().decode("utf-8"))
-  else:
-    for imgpath, boxes, classes in val_data:
-      val_img_paths.append(imgpath.numpy().decode("utf-8"))
-
-  print("Testing Data Size = " + str(len(test_data)))
-
-  #Get augmentation layers for Keras models
-  augmenter = get_augmentation_layers(class_count)
-
-  ####
-  # Dataset Creation
-  ####
-  #Load training data
-  #load_dataset - loads either the YOLO or UNet dataset based on the current model selected
-  #https://keras.io/examples/vision/yolov8/
-  if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
-
-    #If training, then
-    train_ds = train_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-    test_ds = test_data.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
-    
-    #Function that resizes image to FILESIZExFILESIZE coordinates with nearest filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
-    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
-    
-  else:
-
-    train_ds = train_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-    test_ds = test_data.map(load_seg_data, num_parallel_calls=tf.data.AUTOTUNE)
-
-    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True)
-
-  training_len = len(train_data)
-  if(MODE == Mode.TRAIN):
-    train_ds = train_ds.shuffle(BATCH_SIZE * 4)
-    train_ds = train_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
-
-    #Only augment in training
-    train_ds = train_ds.map(augmenter, num_parallel_calls=tf.data.AUTOTUNE)
-  else:
-    train_ds = train_ds.shuffle(training_len)
-    train_ds = train_ds.ragged_batch(training_len, drop_remainder=False)
-  
-
-
-  #Load validation data
-  val_len = len(val_data)
-  if(MODE == Mode.TRAIN):
-    val_ds = val_ds.shuffle(BATCH_SIZE * 4)
-    val_ds = val_ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
-  else:
-    val_ds = val_ds.shuffle(val_len)
-    val_ds = val_ds.ragged_batch(val_len, drop_remainder=False)
-
-  val_ds = val_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
-  
-
-  #Load testing data
-  testing_len = len(test_data)
-  #test_ds = test_ds.shuffle(testing_len)
-  test_ds = test_ds.ragged_batch(testing_len, drop_remainder=False)
-
-  test_ds = test_ds.map(resizing, num_parallel_calls=tf.data.AUTOTUNE)
-
-
-
-  #Map conversion from dictionary to image/bounding bix tuple for YOLO
-  if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
-    #https://keras.io/examples/vision/yolov8/
-    train_ds = train_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-    test_ds = test_ds.map(yolo_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-
-    #Show training images that the YOLO model was trained on...
-    if(OPTION_SHOW_TRAINING_IMAGE_GALLERY and MODE == Mode.DEMO):
+  # #Show training images that the YOLO model was trained on...
+  if(OPTION_SHOW_TRAINING_IMAGE_GALLERY and MODE == Mode.DEMO):
+    if(model_type == ModelType.YOLO_SEG):
+      visualize_training_data(yolo_train_ds, bounding_box_format="xyxy")
+    else:
       visualize_training_data(train_ds, bounding_box_format="xyxy")
-
-
-  else:
-    train_ds = train_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-    test_ds = test_ds.map(seg_dict_to_tuple, num_parallel_calls=tf.data.AUTOTUNE)
-
-  #Perform data prefetch
-  train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-  val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-  test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
 
   #Select the correct backbone for training. Unfortunately, only YOLOv8 modes work at the moment.
   if(MODE == Mode.TRAIN):
@@ -1983,20 +2044,44 @@ def start(model_type):
 
   else:
 
-    #Test data count
-    print("Test data count = " + str(len(test_ds)))
+    #Model type is Yolo-Segmentation
+    #Model type used is NOT YoloSeg then
+    if(model_type == ModelType.YOLO_SEG):
 
-    #TODO - LOAD IMAGES IN DIFFERENT WAY? - ALSO CAUSING METRICS TO BE INCORRECT
-    #Run evaluation loop
-    do_testing(test_img_paths, dataset=test_ds, bounding_box_format="xyxy", no_metrics=False)
+      #Get testing data for both YOLO and unet
+      write_log(-1, "Fetching data...")
+      yolo_test_ds = fetch_data(model_type, data, CycleType.TESTING, all_img_count)
+      unet_test_ds = fetch_data(model_type, data, CycleType.TESTING, all_img_count)
 
-    #If outputting full test and validation image set for u-net, do that as well
-    if(OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION):
-      if(model_type == ModelType.UNET):
+      #Get index-locked predictions for both yolo and unet data sets
+      write_log("Getting predictions on datasets...")
+      do_testing(ModelType.YOLO_SEG, data, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False)
 
-        print("Also Generating Training and Validation Masks for UNet... to Send to YOLO")
-        do_testing(val_img_paths, dataset=val_ds, bounding_box_format="xyxy", no_metrics=True)
-        do_testing(train_img_paths, dataset=train_ds, bounding_box_format="xyxy", no_metrics=True)
+      #TODO: DO TESTING HERE. MAY DONT USE do_testing? WRITE OWN AND USE THAT?
+
+    else:
+  
+
+      #TODO - LOAD IMAGES IN DIFFERENT WAY? - ALSO CAUSING METRICS TO BE INCORRECT
+      #Run evaluation loop
+      do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False)
+
+      #If outputting full test and validation image set for u-net, do that as well
+      if(OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION):
+        if(model_type == ModelType.UNET):
+
+          #This part runs when we're generating masks to save to file. Not used because the results were worse...
+          print("Also Generating Training and Validation Masks for UNet... to Send to YOLO")
+
+          val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
+          val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
+          do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
+
+          train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
+          train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
+          do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
+
+      
 
 #START
 start(MODEL_TYPE)   #Train on YOLO
