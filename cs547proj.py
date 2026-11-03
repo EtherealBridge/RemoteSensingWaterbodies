@@ -619,6 +619,7 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
 #Can the given pixel navigate to the center of the given bounding box, using the mask as a nav mesh?
 def can_nav_to_center_of_box():
 
+
 #Can the given pixel navigate to at least one point on the given bounding box, using the mask as a nav mesh?
 def can_nav_to_box():
 
