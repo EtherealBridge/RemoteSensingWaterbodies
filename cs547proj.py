@@ -4,6 +4,9 @@ import tensorflow as tf
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+#For functions like sqrt
+import math
         
 
 #Report on if script is training with GPU or not
@@ -288,11 +291,134 @@ class BoundingBox():
       self.x1 = x1
       self.y1 = y1
 
+  #Gets the length of this bounding box (from left to right)
+  def getLength(self):
+    return self.x1 - self.x0
+
+  #Gets the height of this bounding box (from top to bottom)
+  def getHeight(self):
+    return self.y1 - self.y0
+
+  #Gets the X radius length of this bounding box
+  #returns - Half of the distance from left to right of this bounding box
+  def getRadiusX(self):
+    length = self.getLength()
+    return length / 2.0
+
+  #Gets the Y radius height
+  #returns - Half of the distance from top to bottom of this bounding box
+  def getRadiusY(self):
+    width = self.getHeight()
+    return width / 2.0
+
+  #Gets this bounding box's center
+  #Takes the diameter (word for it?) of this box and cuts it in half to get radius for both x and y. Then adds that to the start x and y to get exact center of bounding box.
+  #Returns - The exact center local coordinates of this bounding box
+  def getCenter(self):    
+    return (self.x0 + self.getRadiusX(), self.y0 + self.getRadiusY())
+
+  #Returns the area of this bounding box
+  #returns - The area of this bounding box, which is defined as length * height
+  def getArea(self):
+    return self.getLength() * self.getHeight()
+
+  #Returns if this bounding box is closer to a point (of x,y) than the other bounding box (other_bounding_box)
+  def isCloserToPointThan(self, other_bounding_box, x, y):
+    this_bb_distance_to_pt = self.distanceTo(x,y)
+    other_bb_distance_to_pt = other_bounding_box.distanceTo(x,y)
+    return (this_bb_distance_to_pt < other_bb_distance_to_pt)
+
+  #Can this bounding box be routed tp from pixel x,y through the provided unet_mask?
+  #other_bounding_box - The other bounding box to route to
+  #x - The pixel x coordionate
+  #y - The pixel y coordinate
+  #unet_mask - The unet mask to traverse along
+  #returns Whether (true) or not (false) this bounding box can be routed to from the pixel coordinates (x,y) given the unet mask as a nav mesh
+  def canBeRoutedTo(self, other_bounding_box, x, y, unet_mask):
+    
+    
+
   #Output in tensor format
   def toTensor(self):
 
       #1.0 = Full probability water is here, x center coor, y center coor, width, height, 1 flag - water is here
       return [self.x0, self.y0, self.x1, self.y1]
+
+  #Sets the coordinate values in this bounding box from a np array slice
+  #np_slice - The np array slice with the coordinate values [x0,y0,x1,y1]
+  def setValsFromNPSlice(self, np_slice):
+
+    #Split
+    self.x0 = np_slice[0]
+    self.y0 = np_slice[1]
+    self.x1 = np_slice[2]
+    self.y1 = np_slice[3]
+    
+
+  #Sets the class (classification of) in this bounding box
+  #class_index - The class (index) to set for this bounding box. E.g. setting this bounding box to "0" will mean it's a lake for yolo, and "1" will mean it's a lake for image seg (bc image seg at pos 0 is background)
+  def setClass(self, class_index):
+    self.classification = class_index
+
+  #Is the pixel at direct coordinates x,y contained in this bounding box?
+  #x - The x position of the pixel
+  #y - The y position of the pixel
+  #returns - Whether or not the given bounding box contains this pixel. True if this point inside this bounding box. False if not.
+  def containsPixel(self, x, y) -> float:
+
+    #Does square bounds check to see if the point is at the edge of or inside the bounding box coordinates
+    if(x >= self.x0 and x <= self.x1 and y >= self.y0 and y <= self.y1):
+        return True
+    else:
+      return False
+
+
+  #Gets the distance between two 2D vectors
+  #https://wumbo.net/formulas/distance-between-two-points-2d/
+  #vec0 - Vector2 0
+  #vec1 - Vector2 1
+  #returns - The euclidian distance between Vector 0 and Vector 1
+  def getVec2Dist(self, vec0, vec1):
+
+    #d=math.sqrt(∣y2​−y1​∣2+∣x2​−x1​∣2) - I copied this formula from https://wumbo.net/formulas/distance-between-two-points-2d/
+    #https://stackoverflow.com/questions/70793490/how-do-i-calculate-square-root-in-python
+    #https://www.geeksforgeeks.org/python/abs-in-python/
+    return math.sqrt(pow(abs(vec1[1] - vec0[1]),2) + pow(abs(vec1[0] - vec0[0]),2))
+
+  #Gets the vector distance from this bounding box center to the given pixel point (at x,y)
+  #x - The pixel x position on the image, 0-511
+  #y - The pixel y position on the image, 0-511
+  #returns - The distance from the absolute center of this bounding box to the pixel point at (x,y)
+  def distanceTo(self, x, y) -> float:
+    if(self.containsPixel(x,y)): return 0.0
+    else:
+      #https://wumbo.net/formulas/distance-between-two-points-2d/
+      #Get the vector distance from point 0 (the center of this box) to point 1 (x,y)
+      vector_0 = self.getCenter()
+      vector_1 = [x,y]
+      return self.getVec2Dist(vector_0, vector_1)
+
+  #Gets the vector distance of this bounding boxes's edges to the given pixel point (at x,y), Only useful if pixel is not contained by this bounding box. 
+  #   For point inside bouding box, containsPixel(x,y) would be used.
+  #x - The pixel x position the image, 0-511
+  #y - The pixel y position on the image, 0-511
+  #returns - The distance from the closest point on the edge of this bounding box to the pixel at (x,y).
+  def edgeDistanceTo(self, x, y) -> float:
+
+    #if this pixel is inside the box, distance would just be 0 to the edge (we only care if the pixel is outside the box, bc, presumably we've already checked if it is before this)
+    if(self.containsPixel(x,y)): return 0.0
+    else:
+
+      #Clamp to edge of square for X and Y to get the closest point to pixel
+      #https://stackoverflow.com/questions/5254838/calculating-distance-between-a-point-and-a-rectangular-box-nearest-point
+      #var dx = Math.max(rect.min.x - p.x, 0, p.x - rect.max.x);    - example from stack overlflow in javascript
+      #var dy = Math.max(rect.min.y - p.y, 0, p.y - rect.max.y);
+      #return Math.sqrt(dx*dx + dy*dy);
+
+      dist_x = max(self.x0 - x, x - self.x1)
+      dist_y = max(self.y0 - y, y - self.y1)
+      return math.sqrt(pow(dist_x,2) + pow(dist_y,2))
+
 
 #Reads the given text file with the given filename
 def read_text_file(file_name):
@@ -439,8 +565,8 @@ def get_model_type_descriptor(model_type):
 def get_metric_file_path(model_type, metric_type, cycle_type):
 
   #Base path where all metric logs get saved to...
-  #metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"
-  metric_base_path = "C:\\Phee\\Class\\Capstone\\metrics\\"
+  metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"        #Linux
+  #metric_base_path = "C:\\Phee\\Class\\Capstone\\metrics\\"                              #WIN
 
   #Get the descriptive value of the model type (yolo, unet, or yoloseg)
   model = get_model_type_descriptor(model_type)
@@ -473,8 +599,8 @@ def write_metric(epoch, metric_type, cycle_type, metric_val, iou=-1.0):
 #logstr - The log string to write to file
 def write_log(epoch, logstr):
 
-  csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"   #LINUX
-  #csv_path = "C:\\Phee\\Class\\Capstone\\logs\\output.csv"                              #WIN
+  csv_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/output.csv"    #LINUX
+  #csv_path = "C:\\Phee\\Class\\Capstone\\logs\\output.csv"                             #WIN
 
   write_file(epoch, logstr, csv_path)
   print("epoch: " + str(epoch) + " ::: " + logstr)
@@ -536,7 +662,8 @@ class EvaluateSegMetricsCallback(keras.callbacks.Callback):
 #Keras/ TF callback info - https://www.tensorflow.org/api_docs/python/tf/keras/callbacks/Callback
 #Run the evaluation for the YOLO model. This is only for instance segmentation (YOLO)
 #Evaluates using COCO metrics - mAP
-#This runs per step in the model I believe
+#This runs per step in the model I believe - 2026-11-03 - Old comment. This is a callback. It runs on epoch end, given the function on_epoch_end, but can run per step as well. 
+#     Calculates training metrics too
 class EvaluateCOCOMetricsCallback(keras.callbacks.Callback):
     def __init__(self, data, save_path):
         super().__init__()
@@ -579,7 +706,6 @@ class EvaluateCOCOMetricsCallback(keras.callbacks.Callback):
 # #The dice loss of the predicted data vs. the acutal, defined as 2*intersection divided by (sum(y_pred) + sum(y_actual))
 # def get_dice_loss(y_pred, y_actual):
 
-#TODO: WRITE INDIVIDUAL METRICS TO FILE - DURING TESTING AND/OR TRAINING/VALIDATION
 #Write individual metrics to their own files based on the current epoch (or -1 if no epoch), cycle (training, validation, testing) as well
 #epoch - The current epoch
 #metric_type - Type of metric used (type of MetricType)
@@ -619,21 +745,134 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
 #Can the given pixel navigate to the center of the given bounding box, using the mask as a nav mesh?
 def can_nav_to_center_of_box():
 
+#Gets the pixel at a given mesh
+def get_pixel_at(img_index, x, y, unet_mesh):
+  return unet_mesh
+  
+
+#Is the path open between the current x,y coordinates and the destination bounding box (bbox)?
+def is_path_open(bbox : BoundingBox, img_index, x, y, unet_mesh):
+
 
 #Can the given pixel navigate to at least one point on the given bounding box, using the mask as a nav mesh?
-def can_nav_to_box():
+def can_traverse_to(bbox : BoundingBox, img_index, x, y, unet_mesh):
+
+  
+  
 
 
-#Gets the yolo bounding box that is matched to the given pixel coordinate. 
+
+
+#Inserts a bounding box into the given list of bounding boxes by distance to the pixel coordinates a and y
+#new_bbox - The new bounding box to insert into the given list of bounding boxes (Strongly typed bc its annoying to scroll up and keep remembering what the function names are :-/ )
+#bbox_list - The list of bounding boxes to insert into 
 #x - The pixel x coordinate
 #y - The pixel y coordinate
-#yolo_boxes - The collection of yolo boxes here. Can be either predicted or actual boxes
-def get_matched_box_to_pixel(x,y, yolo_boxes):
+#returns - The new list of bounding boxes with the bounding box inserted
+def insert_bounding_box_by_vec_dist(new_bbox : BoundingBox, bbox_list, x, y):
+
+  #If no values to check against, then just append it as the initial value
+  if(len(bbox_list) == 0):
+    bbox_list.append(new_bbox)
+
+  #There are multiple bounding boxes to be inserted into the list of checkable bounding boxes
+  else:
+
+    #The place where the new bounding box will be inserted, defined in the loop
+    insert_placement = len(bbox_list)
+
+    #Loop through bounding box list and place new bounding box in the list
+    for i in range(0, len(bbox_list)):
+
+      #Current bounding box in the loop
+      loop_bbox = bbox_list[i]
+
+      #If the current bounding box is closer than the loop bounding box, then, insert it in front of this bounding box
+      if(new_bbox.isCloserToPointThan(loop_bbox,x,y)):
+
+        #Mark it so that the new bounding box will be inserted in front of this bounding box and then exit the loop
+        insert_placement = i 
+        break
+          
+    #https://numpy.org/devdocs/reference/generated/numpy.insert.html
+    #Insert this bounding box at its found position
+    bbox_list.insert(bbox_list, insert_placement, new_bbox)
+
+    #Return the updated bounding box list
+    return bbox_list
 
 
-def determine_yoloseg_class():
+
+
+
+
+    
+#Determines a segmentation pixel's class by 
+def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred):
+
+  #Rules:
+  # 1 - A pixel is eligible to have its class calculated if a mask pixel has been calculated for it. 
+  # 2 - If a pixel is in A (one only) bounding box, that is the pixel's class
+  # 3- If a pixel is in multiple bounding boxes at the same time, and, both can traversed to on its mesh, the conflict is resolved by finding the shortest vector distance 
+  #         between both bounding boxes to the center of that bounding box
+  # 4 - If a pixel is not in a bounding box (no intersection), then, the pixel will attempt to naively traverse to every bounding box in the image, with bounding boxes being sorted by the 
+  #         2d vector distance of a box's closest point to point x,y on its edge to point x,y itself. This in effect "snaps" a pixel to a bounding box that may have just missed it.
+  # 5 - For traversal, a pixel cannot enter a non-masked spot. It may only traverse along its starting mask, which is contains the pixel's x,y origin
+
+  #Bounding boxes that contain this pixel. Gets appended to when a bounding box is found to contain this pixel  
+  contained_bbox = []
+
+  #Bounding boxes that do not contain this pixel, but, can be traversed to by this pixel by using the unet mask as a nav mesh.
+  traversable_other_bbox = []
+
+  #Bounding boxes that do not contain this pixel. These bounding boxes will be sorted by vector distance to the pixel x,y coordinate
+  other_bbox = []
   
-def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes)
+  for i in range(0, img_boxes.shape[0]):
+
+    #Create a bounding box object with functions - easier to work with bc I can just define functions in it
+    curr_bb = img_boxes[i]
+    curr_class = img_classes[i]
+
+    #Create a bounding box object with: image index here, current class, x0, y0, x1, y1
+    bbox = BoundingBox(i, curr_class, curr_bb[0],curr_bb[1],curr_bb[2],curr_bb[3])
+
+    #Is this pixel inside this bounding box?
+    if(bbox.containsPixel(x,y)):
+      contained_bbox = insert_bounding_box_by_vec_dist(bbox, contained_bbox, x, y)
+      contained_bbox.append(bbox)
+
+    elif(bb)
+
+    #The given bounding box in the loop of bounding boxes does not contain this pixel. Therefore, 
+    else:
+
+      #Insert this bounding box among other potential bounding boxes 
+      other_bbox = insert_bounding_box_by_vec_dist(bbox, other_bbox, x, y)
+
+
+  #If there exists only one bounding box that contains this pixel, that bounding box's class will be this pixel's class
+  if(len(contained_bbox) == 1):
+    
+      
+
+      
+
+
+
+#Returns whether or not the object detection for the given pixel is correct 
+#img_pred_classes - The predicted classes (for the bounding boxes) for this image
+#img_pred_boxes - The predicted bounding boxes for this image
+#img_actual_classes - The actua; classes (for the bounding boxes) for this image
+#img_actual_boxes - The actual bounding boxes for this image
+#x - The x position of the pixel
+#y - The y position of the pixel
+#returns - If the given pixel has a correct object detection
+def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, x, y):
+
+  #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
+  predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, x, y)
+  actual_yolo_seg_class = determine_yoloseg_class(img_actual_classes, img_actual_boxes, x, y)
 
   
 
@@ -695,8 +934,13 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
   #For each image in the image list
   for img_index in range(0, img_count):
 
-    #Get the boxes for this image
+    #Gets the predicted classes and boxes for this image
+    img_pred_classes = yolo_y_pred_classes_np[img_index]
+    img_pred_boxes = yolo_y_pred_boxes_np[img_index]
 
+    #Gets the actual classes and boxes for this image
+    img_act_classes = yolo_y_actual_classes_np[img_index]
+    img_act_boxes = yolo_y_actual_boxes_np[img_index]  
 
     #For each x (horizontal) pixel
     for x in range(0, shape_x):
@@ -734,15 +978,8 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
         #If water is predicted at all, then, run object detection on the water to get the class for it
         if(is_pred_water):
 
-          #Gets the predicted classes and boxes for this image
-          img_pred_classes = yolo_y_pred_classes_np[img_index]
-          img_pred_boxes = yolo_y_pred_boxes_np[img_index]
 
-          #Gets the actual classes and boxes for this image
-          img_act_classes = yolo_y_actual_classes_np[img_index]
-          img_act_boxes = yolo_y_actual_boxes_np[img_index]
-
-            
+            if(is_correct_object_detection())
           
 
 
@@ -1825,6 +2062,7 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
       if(model_type == ModelType.YOLO):
 
         #Visualization for YOLO
+        #https://keras.io/examples/vision/yolov8/
         visualization.plot_bounding_box_gallery(
             images,
             value_range=(0, 255),
@@ -1847,6 +2085,8 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
         #print("y_pred_max_shape = "  + str(y_pred_max.shape[0]) + "," + str(y_pred_max.shape[1]) + "," + str(y_pred_max.shape[2]) + "," + str(y_pred_max.shape[3]))
 
         #Visualization for semantic segmentation
+        #https://keras.io/api/utils/visualization_utils/
+        #^ Other good stuff here too
         visualization.plot_segmentation_mask_gallery(
           images=images,
           y_pred=y_pred_max,
