@@ -130,6 +130,7 @@ class MetricType(Enum):
   CLASSF1 = 10
   BOXDICE = 11
   PIXELDICE = 12
+  YOLOSEGACCURACY = 13
 
 #Represents all the possible cycle states this model can be in
 class CycleType(Enum):
@@ -211,6 +212,9 @@ WEIGHT_DECAY = 0.05
 #Number of input channels to use (RGB = 3 channels)
 INPUT_CHANNELS = 3
 
+#The bounding box format, now customizable! No need to now, but, maybe at a later date if I use this for something else...
+BOUNDING_BOX_FORMAT = "xyxy"
+
 #Colors for bounding mask display - will alternate between these
 BOUNDING_BOX_DISPLAY_COLORS = ((1.0,0,0), (0,1.0,0), (0,0,1.0), (1.0,1.0,0), (0,1.0,1.0), (1.0,0,1.0), (0.5,.125,.25), (.25,.125,.5), (.5,.25,.5))
 
@@ -237,7 +241,9 @@ IOU_SCORING_THRESHOLD = 0.5
 
 #The percent of data to use as test data instead of training data
 #Recommendations: Test 20%, Validation 5% of test data. This are MY recommendations based on class, not a tutorial or something like that's
+#TEST_DATA_PCT = 0.0025      #ENABLE ONLY FOR REALLY QUICK TESTING BC SOME TESTING PROCESSES ARE SLOW...
 TEST_DATA_PCT = 0.1
+
 VALIDATION_SPLIT_PCT = 0.05
 
 #TODO: USE DIFFERENT SEGMENTS OF WATER...
@@ -245,9 +251,9 @@ VALIDATION_SPLIT_PCT = 0.05
 #I would like to expand this model to a three class problem instead of one
 
 if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
-  CLASS_LIST = ("Lake","River")
+  CLASS_LIST = (("Lake","Ocean","Pool","River","Wetlands"))
 else:
-  CLASS_LIST = ("Nothing","Lake","River")
+  CLASS_LIST = ("Nothing","Lake","Ocean","Pool","River","Wetlands")
 class_mapping = dict(zip(range(len(CLASS_LIST)), CLASS_LIST))
 
 #Number of classes in this problem. Though we're looking at water vs. not water, we're really just looking for water, so, one class.
@@ -592,7 +598,7 @@ def get_metric_file_path(model_type, metric_type, cycle_type):
 def write_metric(epoch, metric_type, cycle_type, metric_val, iou=-1.0):
 
   #Get the filename to write to
-  metric_file_path = get_metric_file_path(metric_type, cycle_type)
+  metric_file_path = get_metric_file_path(MODEL_TYPE, metric_type, cycle_type)
 
   #Write to file
   write_file(epoch, str(metric_type) + "," + str(cycle_type) + "," + str(iou) + "," + str(metric_val), metric_file_path)
@@ -672,7 +678,7 @@ class EvaluateCOCOMetricsCallback(keras.callbacks.Callback):
         super().__init__()
         self.data = data
         self.metrics = keras_cv.metrics.BoxCOCOMetrics(
-            bounding_box_format="xyxy",
+            bounding_box_format=BOUNDING_BOX_FORMAT,
             evaluate_freq=1e9,
         )
 
@@ -827,14 +833,14 @@ def insert_bounding_box_by_vec_dist(new_bbox : BoundingBox, bbox_list, x, y):
           
     #https://numpy.org/devdocs/reference/generated/numpy.insert.html
     #Insert this bounding box at its found position
-    bbox_list.insert(bbox_list, insert_placement, new_bbox)
+    np.insert(bbox_list, insert_placement, new_bbox)
 
   #Return the updated bounding box list
   return bbox_list
 
 
 #Determines a segmentation pixel's class by 
-def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred):
+def determine_yoloseg_class(img_classes, img_boxes, img_index, x, y, unet_y_pred):
 
   #Rules:
   # 1 - A pixel is eligible to have its class calculated if a mask pixel has been calculated for it. 
@@ -875,17 +881,17 @@ def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred
 
   #If there exists only one bounding box that contains this pixel, that bounding box's class will be this pixel's class
   if(len(contained_bbox) == 1):
-    return contained_bbox.getClass()
+    return contained_bbox[0].getClass()
 
   #If there exists multiple bounding boxes that contain this pixel, then, select the closest one 
   if(len(contained_bbox) > 1):
-    closest_bbox = get_shortest_dist_bounding_box(contained_bbox)
+    closest_bbox = get_shortest_dist_bounding_box(contained_bbox,x, y)
     if(closest_bbox != None):
       return closest_bbox.getClass()
 
   #If there are other bounding boxes not intersected at all with this pixel, then 
-  if(len(other_bbox > 0)):
-      closest_bbox = get_shortest_dist_bounding_box(other_bbox)
+  if(len(other_bbox) > 0):
+      closest_bbox = get_shortest_dist_bounding_box(other_bbox, x, y)
       if(closest_bbox != None):
         return closest_bbox.getClass()
 
@@ -901,16 +907,21 @@ def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred
 #img_pred_boxes - The predicted bounding boxes for this image
 #img_actual_classes - The actua; classes (for the bounding boxes) for this image
 #img_actual_boxes - The actual bounding boxes for this image
+#img_index - The image index for the image being tested
 #x - The x position of the pixel
 #y - The y position of the pixel
+#unet_y_pred - The unet-created nav mesh
 #returns - If the given pixel has a correct object detection
-def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, x, y):
+def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, img_index, x, y, unet_y_pred):
 
   #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
-  predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, x, y)
-  actual_yolo_seg_class = determine_yoloseg_class(img_actual_classes, img_actual_boxes, x, y)
+  predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, img_index, x, y, unet_y_pred)
+  actual_yolo_seg_class = determine_yoloseg_class(img_actual_classes, img_actual_boxes,img_index, x, y, unet_y_pred)
 
-  if(predicted_yolo_seg_class == actual_yolo_seg_class)
+  # #River mapping was wrong. Should be 2, not 4.
+  # if(predicted_yolo_seg_class == 4):
+    
+  if(predicted_yolo_seg_class == actual_yolo_seg_class):
     return True
   else:
     return False
@@ -923,8 +934,7 @@ def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_cla
 #unet_y_pred - The unet y predicted values
 #unet_y_actual - The unet y actual values
 #metric_type - The desired metric type
-#returns - The calculated metric determined by the provided metric_type
-def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, metric_type):
+def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual):
 
   #Make sure a predicted class is used for the unet prediction. Any class that is not nothing will just be "on" in this case
   unet_y_pred = np.argmax(unet_y_pred, -1, keepdims=True)
@@ -947,8 +957,8 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
   shape_y = unet_y_actual.shape[2]
 
   #Convert dictionaries to simple numpy jagged arrays
-  unet_y_pred_np = keras.ops.convert_to_numpy(unet_y_pred.to_numpy)
-  unet_y_act_np = keras.ops.convert_to_numpy(unet_y_actual.to_numpy)
+  unet_y_pred_np = keras.ops.convert_to_numpy(unet_y_pred)
+  unet_y_act_np = keras.ops.convert_to_numpy(unet_y_actual)
 
   #seg_metrics  - TP, FP, TN, FN for jsut segmentation (water vs. not water)
   true_positives = 0
@@ -961,13 +971,14 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
   total_true_water_pixels = 0
   total_pred_water_pixels = 0
 
+  #Total water pixels that have either been predicted or are true water pixels
+  total_pred_or_true_water_pixels = 0
+
   #Total number of yolo_seg pixels that have both a correct water pixel classification AND a correct yolo classification
   yolo_seg_pixels_correct = 0
 
-  #Calculated ONLY on predicted water pixels. When water is predicted, the total number of yolo segmentation classifications that are actually correct
-  #   This will help determine, if the segmentation is correct, if the YOLO object detection is also correct.
-  #   Will also help determine which is more accurate - segmentation or object detection here
-  yolo_seg_object_detections_correct = 0
+  #Of the pixels predicted (and not necessarily right) how many of them have the correct class?
+  yolo_seg_predictions_correct = 0
 
   #The number of object detections only (only runs on predicted water pixels)
   yolo_seg_total_object_detections = 0
@@ -1000,9 +1011,13 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
         pred_pixel = unet_y_pred_np[img_index,x,y]
         is_pred_water = (pred_pixel > 0)
 
+        #If is true water or predicted water, then increment counter
+        if(is_actual_water or is_pred_water):
+          total_pred_or_true_water_pixels += 1
+
+
         #If the predicted pixel is water and the actual pixel is water, then see if a class can be assigned
         #Potential true positive / true positive for segmentation
-        
         if(is_actual_water):
           total_true_water_pixels += 1
           if(is_pred_water):
@@ -1023,9 +1038,31 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
         if(is_pred_water):
 
             #If the object detection class is correct here, then, add to the total items that are correct for both unet AND yolo
-            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes)):
-              yolo_seg_pixels_correct += 1
+            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, img_index, x, y, unet_y_pred_np)):
+              yolo_seg_predictions_correct += 1
 
+              #If this is a true positive, then increment to total yolo correct as well.
+              if(is_actual_water):
+                yolo_seg_pixels_correct += 1
+
+  #Calculate YOLOSEG true accuracy
+  yolo_seg_accuracy = yolo_seg_pixels_correct / total_pred_water_pixels
+
+  #Recall equals true positives over all positives
+  yolo_seg_recall = true_positives / total_pred_or_true_water_pixels
+
+  #Precision equals correct_true_positives (yolo_seg_pixels_correct) over all positives (total_pred_water_pixels)
+  yolo_seg_precision = yolo_seg_pixels_correct / total_pred_water_pixels
+
+  #P1 score is 
+  yolo_seg_f1_score = 2 * ((yolo_seg_precision * yolo_seg_recall) / (yolo_seg_precision + yolo_seg_recall))
+
+  #Output the yolo seg accuracy
+  write_log(-1, "Total YOLO_SEG accuracy = " + str(yolo_seg_accuracy))
+  write_log(-1, "Total YOLO_SEG recall = " + str(yolo_seg_recall))
+  write_log(-1, "Total YOLO_SEG precision = " + str(yolo_seg_precision))
+  write_log(-1, "Total YOLO_SEG f1 score = " + str(yolo_seg_f1_score))
+  write_metric(-1, MetricType.YOLOSEGACCURACY, CycleType.TESTING, yolo_seg_accuracy)
             
           
 
@@ -1251,7 +1288,7 @@ def get_yolo_metrics_class_box(y_pred, y_actual, specific_class, metric_type, io
 
     #Compute IOU based on the filtered predicted boxes and actual boxes
     #Returns an array of overlap IoUs per predicted box... Just take the maximum confidence to have the best IoU.
-    curr_iou = keras.ops.convert_to_numpy(keras_cv.bounding_box.compute_iou(img_pred_boxes, img_actual_boxes,"xyxy"))
+    curr_iou = keras.ops.convert_to_numpy(keras_cv.bounding_box.compute_iou(img_pred_boxes, img_actual_boxes, BOUNDING_BOX_FORMAT))
 
     #Get the number of positive IOU hits (if IOU count < number of loops, IoU will be penalized with zero for each extra loop)
     for iou_predictions in curr_iou:
@@ -1421,7 +1458,7 @@ def fetch_data(model_type, data, cycle_type, all_img_count):
     ds = ds.map(load_yolo_data, num_parallel_calls=tf.data.AUTOTUNE)
     
     #Function that resizes image to FILESIZExFILESIZE coordinates with nearest filtering. pad_to_aspect_ratio required for BB. BB format is xyxy
-    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True,bounding_box_format="xyxy")
+    resizing = keras_cv.layers.Resizing(FILESIZE,FILESIZE,"nearest",pad_to_aspect_ratio=True,bounding_box_format=BOUNDING_BOX_FORMAT)
     
   else:
 
@@ -1468,18 +1505,16 @@ def get_augmentation_layers(class_count, model_type):
   #https://keras.io/examples/vision/yolov8/
   layers = []
   if(model_type == ModelType.YOLO):
-    #layers.append(keras_cv.layers.Resizing(file_size,file_size,"nearest",pad_to_aspect_ratio=True,bounding_box_format="xyxy"))
     if(AUGMENTATION_FLIP_HORIZONTALLY):
-      layers.append(keras_cv.layers.RandomFlip(mode="horizontal", bounding_box_format="xyxy"))
+      layers.append(keras_cv.layers.RandomFlip(mode="horizontal", bounding_box_format=BOUNDING_BOX_FORMAT))
     if(AUGMENTATION_FLIP_VERTICALLY):
-      layers.append(keras_cv.layers.RandomFlip(mode="vertical", bounding_box_format="xyxy"))
+      layers.append(keras_cv.layers.RandomFlip(mode="vertical", bounding_box_format=BOUNDING_BOX_FORMAT))
     if(AUGMENTATION_RANDOM_ROTATION):
-      layers.append(keras_cv.layers.RandomRotation(factor=(0.0,1.0),bounding_box_format="xyxy", segmentation_classes=class_count))
+      layers.append(keras_cv.layers.RandomRotation(factor=(0.0,1.0),bounding_box_format=BOUNDING_BOX_FORMAT, segmentation_classes=class_count))
 
-    layers.append(keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format="xyxy"))
+    layers.append(keras_cv.layers.Resizing(FILESIZE,FILESIZE,"bilinear",pad_to_aspect_ratio=True,bounding_box_format=BOUNDING_BOX_FORMAT))
 
   else:
-    #layers.append(keras_cv.layers.Resizing(file_size,file_size,"nearest",pad_to_aspect_ratio=True))
     if(AUGMENTATION_FLIP_HORIZONTALLY):
       layers.append(keras_cv.layers.RandomFlip(mode="horizontal"))
     if(AUGMENTATION_FLIP_VERTICALLY):
@@ -1497,10 +1532,6 @@ def get_augmentation_layers(class_count, model_type):
 
   augmenter = keras.Sequential(layers)
   return augmenter
-
-#Output YOLO-SEG metrics to explore the viability of the entire model
-def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual):
-
 
 
 #Outputs the current unet metrics for a given class (or -1 for ALL. 0 is ignored because that's just background)
@@ -1561,26 +1592,29 @@ def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yo
   box_metrics = [MetricType.BOXACCURACY, MetricType.BOXPRECISION, MetricType.BOXRECALL, MetricType.BOXDICE]
   seg_metrics = [MetricType.PIXELACCURACY, MetricType.PIXELPRECISION, MetricType.PIXELRECALL, MetricType.PIXELDICE]
 
-  #For each class index, starting with "All" and then going into specific classes,
-  for class_index in class_indices:
+  if(model_type == ModelType.YOLO or model_type == ModelType.UNET):
+    #For each class index, starting with "All" and then going into specific classes,
+    for class_index in class_indices:
 
-    #For each metric type...
-    for metric_index in range(0, len(class_metrics)):
+      #For each metric type...
+      for metric_index in range(0, len(class_metrics)):
 
-      curr_class_metric_type = class_metrics[metric_index]
-      curr_box_metric_type = box_metrics[metric_index]
-      curr_pixel_metric_type = seg_metrics[metric_index]
-
-      #If this is YOLO testing, then
-      if(model_type == ModelType.YOLO):
-        output_yolo_metrics_per_class(y_pred, y_actual, class_index, curr_class_metric_type, curr_box_metric_type)        
-      #For UNET testing only
-      elif(model_type == ModelType.UNET):
+        curr_class_metric_type = class_metrics[metric_index]
+        curr_box_metric_type = box_metrics[metric_index]
         curr_pixel_metric_type = seg_metrics[metric_index]
-        output_unet_metrics_per_class(y_pred, y_actual, class_index, curr_pixel_metric_type)
 
-      #For YOLO-SEG testing
-      else:
+        #If this is YOLO testing, then
+        if(model_type == ModelType.YOLO):
+          output_yolo_metrics_per_class(y_pred, y_actual, class_index, curr_class_metric_type, curr_box_metric_type)        
+        #For UNET testing only
+        elif(model_type == ModelType.UNET):
+          curr_pixel_metric_type = seg_metrics[metric_index]
+          output_unet_metrics_per_class(y_pred, y_actual, class_index, curr_pixel_metric_type)
+
+  #This is YOLO seg (the final output for the production model. Do only once for performance reasons. All metrics will be calculated in one loop...)
+  else:
+    output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual)
+
 
         
 
@@ -1594,7 +1628,7 @@ def calculate_iou(y_pred, y_actual):
   actual_classes = y_actual["classes"]
   actual_boxes = y_actual["boxes"]
 
-  return keras_cv.bounding_box.compute_iou(pred_boxes, actual_boxes, "xyxy")
+  return keras_cv.bounding_box.compute_iou(pred_boxes, actual_boxes, BOUNDING_BOX_FORMAT)
 
 #https://keras.io/examples/vision/oxford_pets_image_segmentation/
 #***COPIED MODEL STRUCTURE FROM THIS SITE!***
@@ -1804,7 +1838,7 @@ def yolo_train_model(train_ds, val_ds):
     #https://keras.io/examples/vision/yolov8/
   yolo = keras_cv.models.YOLOV8Detector(
     num_classes=len(class_mapping),
-    bounding_box_format="xyxy",
+    bounding_box_format=BOUNDING_BOX_FORMAT,
     backbone=backbone,
     fpn_depth=2,    #Changed from 1 to 2
   )
@@ -1842,7 +1876,7 @@ def yolo_train_model(train_ds, val_ds):
       train_ds,
       validation_data=val_ds,
       epochs=EPOCHS,
-      callbacks=[EvaluateCOCOMetricsCallback(val_ds, model_path), keras_cv.callbacks.PyCOCOCallback(validation_data=val_ds, bounding_box_format="xyxy")],
+      callbacks=[EvaluateCOCOMetricsCallback(val_ds, model_path), keras_cv.callbacks.PyCOCOCallback(validation_data=val_ds, bounding_box_format=BOUNDING_BOX_FORMAT)],
       verbose=VERBOSE,
   )
 
@@ -2099,8 +2133,14 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
   #If true, will calculate and show the metrics. If false, will do neither and skip this step all together
   if(OPTION_CALCULATE_METRICS and no_metrics==False):
 
-    #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
-    output_metrics_per_class(model_type, yolo_y_pred, y_actual)   #YOLO Metrics Out
+    #Model type is YOLO_SEG and should have special behavior
+    if(model_type == ModelType.YOLO_SEG):
+      output_metrics_per_class(ModelType.YOLO_SEG, None, None, yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual)
+
+    #Model type is YOLO or unet for individual testing
+    else:
+      #https://zihaogeng.medium.com/how-to-evaluate-an-object-detection-model-iou-precision-recall-and-map-f7cc12e0dcf6
+      output_metrics_per_class(model_type, y_pred, y_actual)   #YOLO Metrics Out
       
   #If we are showing the output images then...
   if(OPTION_SHOW_OUTPUT_IMAGES and no_metrics==False):
@@ -2457,6 +2497,7 @@ def start(model_type):
     yolo_data = prepare_data(ModelType.YOLO)
     seg_data = prepare_data(ModelType.UNET)
 
+    #NOT NEEDED (I BELIVE - LEAVING FOR NOW)
     #Get yolo training and validation data
     # yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
     # yolo_val_ds = fetch_data(model_type, yolo_data, CycleType.VALIDATION, all_img_count)
@@ -2479,9 +2520,9 @@ def start(model_type):
 
       #Get only yolo data and show that...
       yolo_train_ds = fetch_data(model_type, yolo_data, CycleType.TRAINING, all_img_count)
-      visualize_training_data(yolo_train_ds, bounding_box_format="xyxy")
+      visualize_training_data(yolo_train_ds, bounding_box_format=BOUNDING_BOX_FORMAT)
     else:
-      visualize_training_data(train_ds, bounding_box_format="xyxy")
+      visualize_training_data(train_ds, bounding_box_format=BOUNDING_BOX_FORMAT)
 
   #Select the correct backbone for training. Unfortunately, only YOLOv8 modes work at the moment.
   if(MODE == Mode.TRAIN):
@@ -2499,13 +2540,13 @@ def start(model_type):
 
       #Get index-locked predictions for both yolo and unet data sets
       write_log(-1, "Getting predictions on datasets...")
-      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data)
+      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data)
 
 
     else:
   
       #Run evaluation loop for single model type - mostly for developing both models for YOLO seg
-      do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, no_metrics=False)
+      do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False)
 
       #If outputting full test and validation image set for u-net, do that as well
       if(OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION):
@@ -2516,11 +2557,11 @@ def start(model_type):
 
           #val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
           #val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True)
 
           #train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
           #train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, "xyxy", all_img_count, True)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True)
 
       
 
