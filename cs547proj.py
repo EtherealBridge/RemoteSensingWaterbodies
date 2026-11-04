@@ -328,15 +328,18 @@ class BoundingBox():
     other_bb_distance_to_pt = other_bounding_box.distanceTo(x,y)
     return (this_bb_distance_to_pt < other_bb_distance_to_pt)
 
-  #Can this bounding box be routed tp from pixel x,y through the provided unet_mask?
-  #other_bounding_box - The other bounding box to route to
-  #x - The pixel x coordionate
-  #y - The pixel y coordinate
-  #unet_mask - The unet mask to traverse along
-  #returns Whether (true) or not (false) this bounding box can be routed to from the pixel coordinates (x,y) given the unet mask as a nav mesh
-  def canBeRoutedTo(self, other_bounding_box, x, y, unet_mask):
-    
-    
+  #Returns this bounding boxes class
+  def getClass(self):
+    return self.classification
+
+  # #Can this bounding box be routed tp from pixel x,y through the provided unet_mask?
+  # #other_bounding_box - The other bounding box to route to
+  # #x - The pixel x coordionate
+  # #y - The pixel y coordinate
+  # #unet_mask - The unet mask to traverse along
+  # #returns Whether (true) or not (false) this bounding box can be routed to from the pixel coordinates (x,y) given the unet mask as a nav mesh
+  # def canBeRoutedTo(self, other_bounding_box, x, y, unet_mask):
+  
 
   #Output in tensor format
   def toTensor(self):
@@ -742,23 +745,51 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
   return intersection_area
 
 
-#Can the given pixel navigate to the center of the given bounding box, using the mask as a nav mesh?
-def can_nav_to_center_of_box():
+# #Can the given pixel navigate to the center of the given bounding box, using the mask as a nav mesh?
+# def can_nav_to_center_of_box():
 
-#Gets the pixel at a given mesh
-def get_pixel_at(img_index, x, y, unet_mesh):
-  return unet_mesh
+# #Gets the pixel at a given mesh
+# def get_pixel_at(img_index, x, y, unet_mesh):
+#   return unet_mesh
   
 
-#Is the path open between the current x,y coordinates and the destination bounding box (bbox)?
-def is_path_open(bbox : BoundingBox, img_index, x, y, unet_mesh):
+# #Is the path open between the current x,y coordinates and the destination bounding box (bbox)?
+# def is_path_open(bbox : BoundingBox, img_index, x, y, unet_mesh):
 
 
-#Can the given pixel navigate to at least one point on the given bounding box, using the mask as a nav mesh?
-def can_traverse_to(bbox : BoundingBox, img_index, x, y, unet_mesh):
+# #Can the given pixel navigate to at least one point on the given bounding box, using the mask as a nav mesh?
+# def can_traverse_to(bbox : BoundingBox, img_index, x, y, unet_mesh):
 
   
-  
+#Gets the bounding box among a collection of bounding boxes with the shortest distance to pixel point x,y
+#bounding_boxes - Array of bounding boxes
+#x - Pixel point x
+#y - Pixel point y
+#returns - Bounding box with the shortest distance to pixel point x,y
+def get_shortest_dist_bounding_box(bounding_boxes, x, y):
+
+  #No bounding boxes pass in to get shortest for
+  if(len(bounding_boxes) == 0):return None
+  else:
+
+    #Winning bounding box - initialize with first bounding box and then change these if a bounding box in the list is closer...
+    winning_bounding_box = bounding_boxes[0]
+
+    #For each bounding box from the bounding box array. Skips first one (index 0) because that's the default bounding box and the first to be checked against by the 2nd bounding box (index 1)
+    for bbox_index in range(1,len(bounding_boxes)):
+
+      #Get the current bounding box in the loop
+      curr_bounding_box : BoundingBox = bounding_boxes[bbox_index]
+
+      #Is this bounding box closer than the winning bounding box?
+      if(curr_bounding_box.isCloserToPointThan(winning_bounding_box)):
+        winning_bounding_box = curr_bounding_box
+
+    #return the winning bounding box
+    return winning_bounding_box
+      
+
+
 
 
 
@@ -798,15 +829,10 @@ def insert_bounding_box_by_vec_dist(new_bbox : BoundingBox, bbox_list, x, y):
     #Insert this bounding box at its found position
     bbox_list.insert(bbox_list, insert_placement, new_bbox)
 
-    #Return the updated bounding box list
-    return bbox_list
+  #Return the updated bounding box list
+  return bbox_list
 
 
-
-
-
-
-    
 #Determines a segmentation pixel's class by 
 def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred):
 
@@ -820,7 +846,7 @@ def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred
   # 5 - For traversal, a pixel cannot enter a non-masked spot. It may only traverse along its starting mask, which is contains the pixel's x,y origin
 
   #Bounding boxes that contain this pixel. Gets appended to when a bounding box is found to contain this pixel  
-  contained_bbox = []
+  contained_bbox : BoundingBox = []
 
   #Bounding boxes that do not contain this pixel, but, can be traversed to by this pixel by using the unet mask as a nav mesh.
   traversable_other_bbox = []
@@ -840,9 +866,6 @@ def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred
     #Is this pixel inside this bounding box?
     if(bbox.containsPixel(x,y)):
       contained_bbox = insert_bounding_box_by_vec_dist(bbox, contained_bbox, x, y)
-      contained_bbox.append(bbox)
-
-    elif(bb)
 
     #The given bounding box in the loop of bounding boxes does not contain this pixel. Therefore, 
     else:
@@ -850,11 +873,24 @@ def determine_yoloseg_class(img_index, img_classes, img_boxes, x, y, unet_y_pred
       #Insert this bounding box among other potential bounding boxes 
       other_bbox = insert_bounding_box_by_vec_dist(bbox, other_bbox, x, y)
 
-
   #If there exists only one bounding box that contains this pixel, that bounding box's class will be this pixel's class
   if(len(contained_bbox) == 1):
-    
-      
+    return contained_bbox.getClass()
+
+  #If there exists multiple bounding boxes that contain this pixel, then, select the closest one 
+  if(len(contained_bbox) > 1):
+    closest_bbox = get_shortest_dist_bounding_box(contained_bbox)
+    if(closest_bbox != None):
+      return closest_bbox.getClass()
+
+  #If there are other bounding boxes not intersected at all with this pixel, then 
+  if(len(other_bbox > 0)):
+      closest_bbox = get_shortest_dist_bounding_box(other_bbox)
+      if(closest_bbox != None):
+        return closest_bbox.getClass()
+
+  #No suitable bounding box found
+  return -1
 
       
 
@@ -873,6 +909,11 @@ def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_cla
   #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
   predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, x, y)
   actual_yolo_seg_class = determine_yoloseg_class(img_actual_classes, img_actual_boxes, x, y)
+
+  if(predicted_yolo_seg_class == actual_yolo_seg_class)
+    return True
+  else:
+    return False
 
   
 
@@ -938,9 +979,12 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
     img_pred_classes = yolo_y_pred_classes_np[img_index]
     img_pred_boxes = yolo_y_pred_boxes_np[img_index]
 
+    #Add to number of object detections
+    yolo_seg_total_object_detections += len(img_pred_boxes)
+
     #Gets the actual classes and boxes for this image
-    img_act_classes = yolo_y_actual_classes_np[img_index]
-    img_act_boxes = yolo_y_actual_boxes_np[img_index]  
+    img_actual_classes = yolo_y_actual_classes_np[img_index]
+    img_actual_boxes = yolo_y_actual_boxes_np[img_index]  
 
     #For each x (horizontal) pixel
     for x in range(0, shape_x):
@@ -978,8 +1022,11 @@ def get_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual,
         #If water is predicted at all, then, run object detection on the water to get the class for it
         if(is_pred_water):
 
+            #If the object detection class is correct here, then, add to the total items that are correct for both unet AND yolo
+            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes)):
+              yolo_seg_pixels_correct += 1
 
-            if(is_correct_object_detection())
+            
           
 
 
