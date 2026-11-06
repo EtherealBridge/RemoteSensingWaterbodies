@@ -145,6 +145,14 @@ class YOLOTrainingSource(Enum):
   OriginalImages = 2
 
 
+#Represents a direction
+class Direction(Enum):
+  North = 0,
+  East = 1,
+  South = 2,
+  West = 3
+
+
 #-----------------------------------#
 #Properties
 #-----------------------------------#
@@ -188,6 +196,12 @@ OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION = False
 #What should the source of YOLO training images be? Prefab masks or UNet predictions? Recommend using predictions
 YOLO_TRAINING_SOURCE = YOLOTrainingSource.OriginalImages
 
+#Should we iterate through each YOLO box and flood it using probes gliding along distinct water body mask segments?
+OPTION_FLOOD_YOLO_BOXES_IN_TESTING = True
+
+#For debugging testing - Show the before and after results of flooding along with their IoUs
+OPTION_DEBUG_SHOW_FLOODING_TEST_RESULTS = True
+
 #TODO: MAYBE DO THIS ON FINAL EPOCH? - WILL SAVE ALL VALIDATION IMAGES AS WELL TO FILE
 #When training with image segmentation, save progressive image validation predictions to file
 #TRAINING_SAVE_PROGRESSIVE_IMAGES = True
@@ -215,8 +229,11 @@ INPUT_CHANNELS = 3
 #The bounding box format, now customizable! No need to now, but, maybe at a later date if I use this for something else...
 BOUNDING_BOX_FORMAT = "xyxy"
 
-#Colors for bounding mask display - will alternate between these
-BOUNDING_BOX_DISPLAY_COLORS = ((1.0,0,0), (0,1.0,0), (0,0,1.0), (1.0,1.0,0), (0,1.0,1.0), (1.0,0,1.0), (0.5,.125,.25), (.25,.125,.5), (.5,.25,.5))
+#Colors for bounding mask display
+BOX_COLOR_TRUE = (0,200,0)
+BOX_COLOR_ORIGINAL_BOX = (255,0,0)
+BOX_COLOR_NEW_BOX = (255,255,0)
+
 
 #The optimizer selection for this YOLO instance
 #Can choose ADAM or RMSProp
@@ -323,6 +340,14 @@ class BoundingBox():
   def getCenter(self):    
     return (self.x0 + self.getRadiusX(), self.y0 + self.getRadiusY())
 
+  #Gets the maximum position of this bounding box (upper right-hand corner)
+  def getMax(self):
+    return [self.x1,self.y1]
+
+  #Gets the minimum position of this bounding box (lower left-hand corner)
+  def getMin(self):
+    return [self.x0, self.y0];
+
   #Returns the area of this bounding box
   #returns - The area of this bounding box, which is defined as length * height
   def getArea(self):
@@ -427,6 +452,192 @@ class BoundingBox():
       dist_x = max(self.x0 - x, x - self.x1)
       dist_y = max(self.y0 - y, y - self.y1)
       return math.sqrt(pow(dist_x,2) + pow(dist_y,2))
+
+
+
+#Represents a probe that can traverse through a unet mesh
+class Probe():
+
+  #The pixel position of the unet mask
+  start_position = [0,0]
+
+  #The movement direction of this probe
+  move_direction : Direction = Direction.North
+
+  #The total steps this probe has taken
+  steps = 0
+
+  #Initializes a new probe
+  #start_position - The starting position of this probe
+  #move_direction - The movement direction of this probe
+  def __init__(self, start_position, move_direction):
+    self.start_position = start_position
+    self.move_direction = move_direction
+
+  #Gets the two dimensional movement direction as a tuple. This is based on the enum direction and is oriented as x,y movement direction.
+  #North = [0,1]
+  #East = [1,0]
+  #South = [0,-1]
+  #West = [-1,0]
+  #returns - The 2D movement direction based on the current movement direction
+  def getMoveDirection2D(self):
+
+    if(self.move_direction == Direction.North):
+      return [0,1]
+    elif (self.move_direction == Direction.East):
+      return [1,0]
+    elif (self.move_direction == Direction.South):
+          return [0,-1]
+    else:
+      return [-1,0]
+
+  #Get the movement direction of this probe in terms of y movement direction (positive 1 = up, negative 1 = down)
+  def getMovementYDirection(self):
+    return self.getMoveDirection2D[1]
+
+  #Gets the movement X direction (East-West) - (East is positive 1, West is negative 1)
+  def getMovementXDirection(self):
+    return self.getMoveDirection2D[0]
+
+  #Gets the starting position of this probe (steps = 0)
+  def getStartingPosition(self):
+    return self.start_position
+
+  #Gets where this probe would be on the image with the given number of steps
+  #steps - The number of steps to simular probe movement for
+  #returns - The position this probe would be, given the number of steps defined by <steps>
+  def getPositionFromSteps(self, steps):
+
+    #Get the x and y movement direction in terms of 1 pixel
+    movement_direction_x = self.getMovementXDirection()
+    movement_direction_y = self.getMovementYDirection()
+
+    #Get the final position based on steps
+    final_x = movement_direction_x * steps
+    final_y = movement_direction_y * steps
+
+    return [final_x, final_y] 
+
+  #Gets this probe's current position
+  def getCurrentPosition(self):
+    return self.getPositionFromSteps(self.steps)
+
+  #Gets the pixel of the unet nav mesh at the given x,y position
+  #unet_nav_mesh - The navigation mesh - the unet prediction mesh
+  #x - The x image position to get the pixel for
+  #y - The y image position to get the pixel for
+  #returns - The pixel (class index) at the given position
+  def getPixelAtPos(self, unet_nav_mesh, x, y):
+    return unet_nav_mesh[x,y]
+
+  #Gets the current pixel that this pixel is on 
+  #unet_nav_mesh - The unet nav mesh being traversed
+  def getCurrentPixel(self, unet_nav_mesh):
+
+    #Get x and y position
+    x = self.getCurrentPosition()[0]
+    y = self.getCurrentPosition()[1]
+
+    #Gets the pixel at the givewn x,y position
+    return self.getPixelAtPos(unet_nav_mesh, x,y)
+
+  #Gets the next position to be traversed to by this probe
+  def getNextPosition(self):
+    next_step = self.steps + 1
+    return self.getPositionFromSteps(next_step)
+
+  #Gets the next pixel this probe would traverse to
+  #unet_nav_mesh - The unet predicted nav mesh that this probe can travel on
+  def getNextPixel(self, unet_nav_mesh):
+    next_pos = self.getNextPosition()
+    return unet_nav_mesh[next_pos[0],next_pos[1]]
+
+  #Is the given pixel value on? Pixels are just on 1 or off 0
+  def isPixelOn(self, pixel_val):
+    return (pixel_val > 0)
+
+  #Is the current pixel that this probe occupies on?
+  def isCurrentPixelOn(self):
+    curr_pixel = self.getPixelAtPos(self.getCurrentPosition())
+    return self.isPixelOn(curr_pixel)
+
+  #Is the next pixel this probe would traverse to on?
+  #unet_nav_mesh - The nav mesh that this probe can traverse
+  #return - Is the next pixel this probe would travel to on?
+  def isNextPixelOn(self, unet_nav_mesh):
+    next_pixel = self.getNextPixel(unet_nav_mesh)
+    return self.isPixelOn(next_pixel)
+  
+  #Move one pixel (increments number of steps of this probe)
+  def move(self):
+    self.steps += 1
+
+  #Runs this probe until it hits the following:
+  #1 - An "off" pixel
+  #2 - The edge of the map
+  #unet_nav_mesh - The entire navigation mesh for this image
+  def simulate(self, unet_nav_mesh):
+
+    #Get max possible positions of the unet mesh
+    mesh_size_x = unet_nav_mesh.shape[0]
+    mesh_size_y = unet_nav_mesh.shape[1]
+
+    #https://www.w3schools.com/python/python_while_loops.asp
+    pos = self.getCurrentPosition()
+    current_pixel_class = self.getCurrentPixel(unet_nav_mesh)
+    #While on a unet mesh and in-bounds for the image then
+    while(current_pixel_class > 0 and pos[0] >= 0 and pos[0] < mesh_size_x and pos[1] >= 0 and pos[1] < mesh_size_y):
+
+      #If the next pixel is an on pixel, then, we can traverse to it. Also update the position.    
+      if(self.isNextPixelOn(unet_nav_mesh)):
+
+        #Move forward and update position
+        self.move()
+        pos = self.getCurrentPosition()
+
+      #Hit the end of the navmesh
+      else:
+
+        #Exits the loop - probe cannot move any further
+        break
+
+  #Inflates the given bounding box from this probe
+  #bounding_box - The bounding box to inflate
+  #returns - The inflated bounding box, inflated from this probe
+  def getInflatedBoundingBox(self, bounding_box : BoundingBox) -> BoundingBox:
+
+    #Get bounding box max X and max Y
+    bb_max_x = bounding_box.getMax()[0]
+    bb_max_y = bounding_box.getMax()[1]
+    bb_min_x = bounding_box.getMin()[0]
+    bb_min_y = bounding_box.getMin()[1]
+
+    #Get the current position of this probe
+    probe_x_pos = self.getCurrentPosition[0]
+    probe_y_pos = self.getCurrentPosition[1]
+
+    #The inflated bounding box values
+    inflated_min_x = bb_min_x
+    inflated_min_y = bb_min_y
+    inflated_max_x = bb_max_x
+    inflated_max_y = bb_max_y
+
+    #Inflate bounding box based on direction
+    if(self.move_direction == Direction.North):
+      inflated_max_y = max(probe_y_pos, inflated_max_y)
+    elif(self.move_direction == Direction.East):
+      inflated_max_x = max(probe_x_pos, inflated_max_x)
+    elif(self.move_direction == Direction.South):
+        inflated_min_y = min(probe_y_pos, inflated_min_y)
+    elif(self.move_direction == Direction.West):
+        inflated_min_x = min(probe_x_pos, inflated_min_x)
+
+    #Inflate the bounding box based on new values
+    bounding_box.setValsFromNPSlice([inflated_min_x,inflated_min_y, inflated_max_x, inflated_max_y])
+
+    #Return the inflated bounding box
+    return bounding_box
+
 
 
 #Reads the given text file with the given filename
@@ -560,10 +771,6 @@ def get_model_type_descriptor(model_type):
     return "unet_"
   else:
     return "yolo_seg"
-
-  
-    
-
     
 
 #Get the metric file path from the metric type and cycle type
@@ -1882,6 +2089,8 @@ def yolo_train_model(train_ds, val_ds):
 
 
 #Visualize the incoming training YOLO data to make sure it has accurate ground truths
+#train_ds - The training datasource being used
+#bounding_box_format - The bounding box format (typically "xyxy")
 def visualize_training_data(train_ds, bounding_box_format):
   images, y_actual = next(iter(train_ds.take(1)))
   visualization.plot_bounding_box_gallery(
@@ -1896,6 +2105,98 @@ def visualize_training_data(train_ds, bounding_box_format):
     class_mapping=class_mapping,
   )  
 
+#Visualize the current testing data - show it in a window with ground truth vs. predicted bounding boxes
+#y_actual - The actual bounding boxes
+#y_pred - The predicted bounding boxes
+#num_columns - The number of columns to show
+#num_rows - The number of rows to show
+def visualize_testing_data(y_actual, y_pred, num_columns, num_rows, images, bou):
+      
+  #Visualization for YOLO
+  #https://keras.io/examples/vision/yolov8/
+  visualization.plot_bounding_box_gallery(
+      images=images,
+      value_range=(0, 255),
+      bounding_box_format=BOUNDING_BOX_FORMAT,
+      y_true=y_actual,
+      y_pred=y_pred,
+      scale=1,
+      rows=num_rows,
+      cols=num_columns,
+      font_scale=1,
+      class_mapping=class_mapping,
+
+  )
+
+
+#Nothing special - just shows multiple images
+#keras.io/api/utils/visualization_utils/
+#images - The image array to show
+def show_images(images, num_columns, num_rows):
+
+  #Shows images in a gallery
+  keras.visualization.plot_image_gallery(
+    images,
+    y_true=None,
+    y_pred=None,
+    label_map=None,
+    rows=num_rows,
+    cols=num_columns,
+    value_range=(0, 255),
+    scale=1,
+    path=None,
+    show=True,
+    transparent=True,
+    dpi=60,
+    legend_handles=None,
+    data_format=None,
+)
+
+
+#Nothing special - just shows an image
+#keras.io/api/utils/visualization_utils/
+#image - The image to show
+def show_image(image):
+  show_images(image,1,1)
+
+
+#Draws a unet segmentation mask on the given image. Then, returns the image with the mask pixels set on it
+#https://keras.io/api/utils/visualization_utils/
+#image - The image to draw the unet segmentation mask on top of
+def draw_segmentation_on_image(image, unet_segmentation_mask):
+
+  keras.visualization.draw_segmentation_masks(
+      images=image,
+      segmentation_masks=unet_segmentation_mask,
+      num_classes=len(class_mapping),
+      color_mapping=None,
+      alpha=0.8,
+      blend=True,
+      ignore_index=-1,
+      data_format=None,
+  )
+
+
+#Draws a collection of bounding boxes on an image
+#https://keras.io/api/utils/visualization_utils/
+#curr_image - The image to draw bounding box
+#bounding_boxes - The collection of bounding boxes to draw on this image
+#color - The bounding box color as a RGB tuple (R,G,B) e.g. (128,128,128) for grey. Min 0, Max 255 for each.
+#returns - The image (as pixel numpy array) with bounding boxes drawn on it
+def draw_bounding_boxes_on_image(image, bounding_boxes, color):
+
+  #From https://keras.io/api/utils/visualization_utils/ - Draw a bounding box on an image
+  keras.visualization.draw_bounding_boxes(
+      images=image,
+      bounding_boxes=bounding_boxes,
+      bounding_box_format=BOUNDING_BOX_FORMAT,
+      class_mapping=class_mapping,
+      color=color,
+      line_thickness=2,
+      text_thickness=1,
+      font_scale=1.0,
+      data_format=None,
+  )
 
 #Given the class name, convert it to the class index
 #classname (string) - The name of the class to convert to an index - must match values in CLASS_LIST
@@ -1918,6 +2219,190 @@ def getClassIndexFromName(classname) -> int:
   #
   #Class name has not been found
   return -1
+
+
+#Is the given location a valid navigation mesh position?
+#unet_predicted_masks - All unet predictions as navigation meshes
+#img_index - The image index that is index-locked with the current YOLO image with its bounding boxes being inflated.
+#x - The pixel x position
+#y - The pixel y position
+#returns - If the current position is on a unet prediction mesh pixel that is on (True), or off (False)
+def is_valid_probe_start(unet_predicted_masks, img_index, x, y):
+  return (unet_predicted_masks[img_index,x,y] > 0)
+
+#Get all valid probes to use for the given bounding box
+#unet_predicted_masks - The predicted u net mask as a nav mesh
+#bounding_box - The bounding box to get the probes for
+#returns - Collection of valid probes for the given bounding box
+def get_yolo_box_probes(unet_predicted_masks, bounding_box : BoundingBox):
+
+  #Get min and max positions for bounding box
+  bb_min = bounding_box.getMin()
+  bb_max = bounding_box.getMax()
+  bb_center = bounding_box.getCenter()
+  minX = bb_min[0]
+  minY = bb_min[1]
+  centerX = bb_center[0]
+  centerY = bb_center[1]
+  maxX = bb_max[0]
+  maxY = bb_max[1]
+
+  #Get positions for probes
+  posN = [maxY, centerX]
+  posNE = bb_max
+  posE = [centerY, maxX]
+  posSE = [minY, maxX]
+  posS = [minY, centerX]
+  posSW = bb_min
+  posW = [centerY, minX]
+  posNW = [maxY, minX]
+  posCenter = [centerX, centerY];
+
+  #Get probes to use
+  testing_probes =[]
+  probe_n_up = Probe(posN, Direction.North)
+  testing_probes.append(probe_n_up)
+
+  probe_ne_up = Probe(posNE, Direction.North)
+  probe_ne_east = Probe(posNE, Direction.East)
+  testing_probes.append(probe_ne_up)
+  testing_probes.append(probe_ne_east)
+
+  probe_e_up = Probe(posE, Direction.East)
+  testing_probes.append(probe_e_up)
+
+  probe_se_up = Probe(posSE, Direction.East)
+  probe_se_east = Probe(posSE, Direction.South)
+  testing_probes.append(probe_se_up)
+  testing_probes.append(probe_se_east)
+
+  probe_s_down = Probe(posS, Direction.South)
+  testing_probes.append(probe_s_down)
+
+  probe_sw_up = Probe(posSW, Direction.South)
+  probe_sw_east = Probe(posSW, Direction.West)
+  testing_probes.append(probe_sw_up)
+  testing_probes.append(probe_sw_east)
+
+  probe_w_down = Probe(posW, Direction.West)
+  testing_probes.append(probe_w_down)
+
+  probe_nw_up = Probe(posNW, Direction.West)
+  probe_nw_east = Probe(posNW, Direction.North)
+  testing_probes.append(probe_nw_up)
+  testing_probes.append(probe_nw_east)
+
+
+  #TODO: If yolo bounding box outside mesh, maybe try to find outward most point of continuous mesh? Can try this if time permits.
+
+  #Final probes to use which are actually on the mesh
+  final_probes = []
+
+  #Test each probe to see if it's on the navigation mesh. If not, then do not use it.
+  #This will always have 9 directional probes including the center probe
+  for i in range(0, len(testing_probes)):
+
+    #The current probe being tested
+    curr_probe = testing_probes[i]
+
+    #Is this probe in a valid starting position?
+    if(is_valid_probe_start(curr_probe)):
+      final_probes.append(curr_probe)
+
+  return final_probes
+
+  
+
+#Causes probes to fire from various bounds on the bounding box to try and find with some accuracy where the edge of the unet mask is.
+#unet_predicted_masks - The unet predicted masks used as a navigation mesh
+#bounding_box - The current bounding box being inflated
+#returns - The bounding box which may have been inflated or left untouched
+def inflate_bounding_box(unet_predicted_masks, bounding_box : BoundingBox):
+
+  #From center, add these probe positions to the list: N, NE, E, SE, S, SW, W, NW
+  #     X--X--X
+  #     '     '
+  #     X     X
+  #     '     '
+  #     X--X--X
+
+  #Then, firing probes visualized...
+  #     ^  ^  ^
+  #   <-X--X--X >
+  #     '     '
+  #   <-X     X->
+  #     '     '
+  #   <-X--X--X->
+  #     v  v  v
+  #
+  #The probes continue until they hit an edge of the bounding box
+
+  #Get the locations to start probes from for this bounding box.
+  final_bounding_box_probes = get_yolo_box_probes(unet_predicted_masks, bounding_box)
+
+  #For each valid probe, simulate (traverse nav mesh in given direction) and then inflate the bounding box
+  for i in range(0, len(final_bounding_box_probes)):
+    curr_probe : Probe = final_bounding_box_probes[i]
+    
+    #Simulate for new bounds
+    curr_probe.simulate(unet_predicted_masks)
+
+    #inflate this bounding box
+    bounding_box = curr_probe.getInflatedBoundingBox(bounding_box)
+
+  #return the bounding box that may have been inflated or left untouched
+  return bounding_box
+
+  
+
+  
+
+
+#Floods YOLO predictions using the unet masks as a navigation area for flooding probes. Expands YOLO box min/max to unet mask section min/max.
+#yolo_predicted_bounding_boxes - The YOLO box predictions - Will have the same
+#unet_predicted_masks - The predicted pixels per image for unet masks
+def get_flooded_yolo_predictions(yolo_predicted_bounding_boxes, unet_predicted_masks):
+
+  #Convert yolo predictions and unet predictions from Keras formatted jagged arrays to numpy multi-dimensional arrays. Easier to work with and faster...
+  yolo_predicted_bounding_boxes_np = tf.ops.convert_to_numpy(yolo_predicted_bounding_boxes)
+  unet_predicted_masks_np = tf.ops.convert_to_numpy(unet_predicted_masks)
+
+  #Get the dimensions and bounds of our process. 
+  #   For example, flooding probes must stay between pixel indices of 0 and bounds_x - 1 or bounds_y - 1 (img coords are zero-based)
+  num_images = unet_predicted_masks_np.shape[0]
+
+  #For each bounding box prediction, Get the probe locations to flood from. Probes will run on the edges of the bounding box and only if they are starting on 
+  #    a valid navigation mesh pixel
+  #For each image in the yolo or unet predictions (both are index-locked for images)
+  for img_index in range(0, num_images):
+
+    #Get bounding boxes for this image location
+    img_bounding_boxes = yolo_predicted_bounding_boxes_np["boxes"][img_index]
+
+    #Get the number of bounding boxes in this image
+    img_bounding_box_count = len(img_bounding_boxes)
+
+    #For each bounding box in this image, flood it and inflate it
+    for img_bounding_box_index in range(0, img_bounding_box_count):
+
+      #The current bounding box in the loop
+      curr_bounding_box_basedata = img_bounding_boxes[img_bounding_box_index]
+
+      #Create a new bounding box based on values from a numpy multi-dimensional array slice
+      curr_bounding_box = BoundingBox().setValsFromNPSlice(curr_bounding_box_basedata) 
+
+      #TODO: SHOW FLOODING TEST RESULTS?
+      #if(OPTION_DEBUG_SHOW_FLOODING_TEST_RESULTS):
+
+      #Inflate this bounding box using the unet mesh as a navigation mesh
+      new_bounding_box = inflate_bounding_box(unet_predicted_masks_np, curr_bounding_box)
+
+      #Set inflated bounding box
+      yolo_predicted_bounding_boxes_np["boxes"][img_index] = new_bounding_box
+
+  #Return the final, inflated bounding boxes
+  return yolo_predicted_bounding_boxes
+  
 
 #Saves a segmentation image with accumulated pixels and the base image path
 #base_image_path - The base image path that will be used to save the segmentation image
@@ -2125,6 +2610,19 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
     print("Total Images: " + str(total_image_count))
     print("YOLO Images: " + str(yolo_image_count))
     print("UNET Images: " + str(seg_image_count))
+
+    #Do flooding for yolo predictions based on unet masks if set to do so
+    y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)    #Get just the predicted class index per pixel rather than confidence scores per class
+
+    #Should we flood YOLO boxes and inflate them to get better accuracy based on UNET Prediction Masks?
+    if(OPTION_FLOOD_YOLO_BOXES_IN_TESTING):
+
+      #Flood unet masks (as navigation meshes for flooding probes to inflate YOLO boxes based on predicted uninterrupted water body area.
+      #   e.g. - A river will continuously flow, generally uninterrupted, and, a lake will be continuous as well.
+      #   The purpose of probes gliding along the mask is to only inflate in one isolated water body - as soon as a probe hits something that is not water,
+      #   it will stop.
+      yolo_y_pred = get_flooded_yolo_predictions(yolo_y_pred, unet_y_pred)
+
   else:
     #Get and display the number of images
     num_images = len(images)
