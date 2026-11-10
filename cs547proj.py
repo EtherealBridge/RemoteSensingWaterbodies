@@ -76,8 +76,13 @@ from PIL import Image                         #Pillow (PIL) allows creating new 
 #               ability to understand existing data masks (not predicted data)!
 class ModelType(Enum):
   YOLO = 0
-  UNET = 1
+  SEGMENTATION = 1
   YOLO_SEG = 2
+
+#The segmentation type when doing image segmentation. UNet or DeepLabV3Plus?
+class ModelSegmentationType(Enum):
+  UNET = 0
+  DEEPLABV3PLUS = 1
 
 #A type of path, e.g. for models, images, etc.
 class PathType(Enum):
@@ -153,6 +158,18 @@ class Direction(Enum):
   West = 3
 
 
+#Represents which part of the box we'll try to have pixels snap to when classifying them - 
+#   the center of a bounding box (good if point is inside the bounding box)
+#   or the edge of a bounding box (good if the point is outside the bounding box)
+class BoundingBoxProximityDetermination(Enum):
+  Center = 0
+  Perimeter = 1
+
+#Represents which type of mask space - Positive (on, white pixel) or Negative (off, black pixel)
+class MaskSpaceType(Enum):
+  PositiveSpace = 0
+  NegativeSpace = 1
+
 #-----------------------------------#
 #Properties
 #-----------------------------------#
@@ -166,8 +183,12 @@ MODE = Mode.DEMO
 
 #Select the specific model type - YOLO (bounding box segmentation) or U-NET Xception-Like Model
 #MODEL_TYPE = ModelType.YOLO
-#MODEL_TYPE = ModelType.UNET
+#MODEL_TYPE = ModelType.SEGMENTATION
 MODEL_TYPE = ModelType.YOLO_SEG
+
+#For segmentation, the type of segmentation model to use
+#SEGMENTATION_TYPE = ModelSegmentationType.UNET
+SEGMENTATION_TYPE = ModelSegmentationType.DEEPLABV3PLUS
 
 #The size of the YOLO model used...
 #MODEL_SIZE = ModelSize.Small
@@ -201,6 +222,11 @@ OPTION_FLOOD_YOLO_BOXES_IN_TESTING = True
 
 #For debugging testing - Show the before and after results of flooding along with their IoUs
 OPTION_DEBUG_SHOW_FLOODING_TEST_RESULTS = True
+
+
+#The size of the kernel and iterates through pixels to try and find an "on" mask pixel.
+#For example, size of 1 will yield a 3x3 kernel. Size of 0 will yield just at the pixel point
+OPTION_FLOODING_KERNEL_SIZE = 1
 
 #TODO: MAYBE DO THIS ON FINAL EPOCH? - WILL SAVE ALL VALIDATION IMAGES AS WELL TO FILE
 #When training with image segmentation, save progressive image validation predictions to file
@@ -241,7 +267,7 @@ OPTIMIZER = Optimizer.ADAM
 
 #Numb
 #Number of training epochs (loops) to run
-EPOCHS = 50
+EPOCHS = 500
 
 #Should the trainer show extra status text?
 VERBOSE = 1
@@ -268,9 +294,9 @@ VALIDATION_SPLIT_PCT = 0.05
 #I would like to expand this model to a three class problem instead of one
 
 if(MODEL_TYPE == ModelType.YOLO or MODEL_TYPE == ModelType.YOLO_SEG):
-  CLASS_LIST = (("Lake","Ocean","Pool","River","Wetlands"))
+  CLASS_LIST = ("Lake", "x", "xx", "River", "xxx")
 else:
-  CLASS_LIST = ("Nothing","Lake","Ocean","Pool","River","Wetlands")
+  CLASS_LIST = ("Nothing","Lake", "x", "xx", "River", "xxx")
 class_mapping = dict(zip(range(len(CLASS_LIST)), CLASS_LIST))
 
 #Number of classes in this problem. Though we're looking at water vs. not water, we're really just looking for water, so, one class.
@@ -314,11 +340,18 @@ class BoundingBox():
       self.x1 = x1
       self.y1 = y1
 
+  #Is this a valid bounding box? For all invalid bounding boxes (created through padding), their values will be -1.
+  #returns - If this is a valid bounding box that was not created through padding
+  def isValid(self):
+    return self.x0 != -1.0
+
   #Gets the length of this bounding box (from left to right)
+  #returns - The length of this bounding box
   def getLength(self):
     return self.x1 - self.x0
 
-  #Gets the height of this bounding box (from top to bottom)
+  #Gets the height of this bounding box (from top to bottom)8
+  #returns - The height of this bounding box
   def getHeight(self):
     return self.y1 - self.y0
 
@@ -354,6 +387,7 @@ class BoundingBox():
     return self.getLength() * self.getHeight()
 
   #Returns if this bounding box is closer to a point (of x,y) than the other bounding box (other_bounding_box)
+  #Uses the bounding box center points
   def isCloserToPointThan(self, other_bounding_box, x, y):
     this_bb_distance_to_pt = self.distanceTo(x,y)
     other_bb_distance_to_pt = other_bounding_box.distanceTo(x,y)
@@ -424,13 +458,11 @@ class BoundingBox():
   #y - The pixel y position on the image, 0-511
   #returns - The distance from the absolute center of this bounding box to the pixel point at (x,y)
   def distanceTo(self, x, y) -> float:
-    if(self.containsPixel(x,y)): return 0.0
-    else:
-      #https://wumbo.net/formulas/distance-between-two-points-2d/
-      #Get the vector distance from point 0 (the center of this box) to point 1 (x,y)
-      vector_0 = self.getCenter()
-      vector_1 = [x,y]
-      return self.getVec2Dist(vector_0, vector_1)
+    #https://wumbo.net/formulas/distance-between-two-points-2d/
+    #Get the vector distance from point 0 (the center of this box) to point 1 (x,y)
+    vector_0 = self.getCenter()
+    vector_1 = [x,y]
+    return self.getVec2Dist(vector_0, vector_1)
 
   #Gets the vector distance of this bounding boxes's edges to the given pixel point (at x,y), Only useful if pixel is not contained by this bounding box. 
   #   For point inside bouding box, containsPixel(x,y) would be used.
@@ -454,6 +486,13 @@ class BoundingBox():
       return math.sqrt(pow(dist_x,2) + pow(dist_y,2))
 
 
+  #Determines if this bounding box is closer to a point (of x,y) than the other bounding box (other_bounding_box) but uses 
+  #   the closest point on the perimeter of the bounding box instead. Good if the given point is outside the bounding box.
+  def isCloserToEdgeThan(self, other_bounding_box, x, y):
+    edge_dist_this = self.edgeDistanceTo(x,y)
+    edge_dist_other = other_bounding_box.edgeDistanceTo(x,y)
+    return edge_dist_this < edge_dist_other
+
 
 #Represents a probe that can traverse through a unet mesh
 class Probe():
@@ -467,12 +506,23 @@ class Probe():
   #The total steps this probe has taken
   steps = 0
 
+  #Does this probe traverse in positive space (on mask pixels) or negative space (off mask pixels)
+  mask_space_type = MaskSpaceType.PositiveSpace
+
+  #The maximum number of steps this probe can take before its simulation ends
+  max_life = 9999
+
   #Initializes a new probe
   #start_position - The starting position of this probe
   #move_direction - The movement direction of this probe
-  def __init__(self, start_position, move_direction):
+  #mask_space_type - Does this probe traverse in positive space (on mask pixels) or negative space (off mask pixels) (Type of MaskSpaceType)
+  #max_life - The maximum number of steps this probe can take before its simulation ends
+  def __init__(self, start_position, move_direction : Direction, mask_space_type : MaskSpaceType, max_life = 9999):
     self.start_position = start_position
     self.move_direction = move_direction
+    self.mask_space_type = mask_space_type
+    self.max_life = max_life
+  
 
   #Gets the two dimensional movement direction as a tuple. This is based on the enum direction and is oriented as x,y movement direction.
   #North = [0,1]
@@ -493,28 +543,45 @@ class Probe():
 
   #Get the movement direction of this probe in terms of y movement direction (positive 1 = up, negative 1 = down)
   def getMovementYDirection(self):
-    return self.getMoveDirection2D[1]
+    return self.getMoveDirection2D()[1]
+  
 
   #Gets the movement X direction (East-West) - (East is positive 1, West is negative 1)
   def getMovementXDirection(self):
-    return self.getMoveDirection2D[0]
+    return self.getMoveDirection2D()[0]
 
+
+  #Gets the starting X Position of this probe
+  def getStartXPosition(self):
+    return self.getStartingPosition()[0]
+  
+  
+  #Gets the starting Y Position of this probe
+  def getStartYPosition(self):
+    return self.getStartingPosition()[1]
+
+  
   #Gets the starting position of this probe (steps = 0)
   def getStartingPosition(self):
     return self.start_position
+  
 
   #Gets where this probe would be on the image with the given number of steps
   #steps - The number of steps to simular probe movement for
   #returns - The position this probe would be, given the number of steps defined by <steps>
   def getPositionFromSteps(self, steps):
 
+    #Get starting position
+    start_x = self.getStartXPosition()
+    start_y = self.getStartYPosition()
+
     #Get the x and y movement direction in terms of 1 pixel
     movement_direction_x = self.getMovementXDirection()
     movement_direction_y = self.getMovementYDirection()
 
     #Get the final position based on steps
-    final_x = movement_direction_x * steps
-    final_y = movement_direction_y * steps
+    final_x = start_x + (movement_direction_x * steps)
+    final_y = start_y + (movement_direction_y * steps)
 
     return [final_x, final_y] 
 
@@ -528,7 +595,17 @@ class Probe():
   #y - The y image position to get the pixel for
   #returns - The pixel (class index) at the given position
   def getPixelAtPos(self, unet_nav_mesh, x, y):
-    return unet_nav_mesh[x,y]
+    
+    #Check bounds to not fall out of them
+    shape_y = unet_nav_mesh.shape[0]
+    shape_x = unet_nav_mesh.shape[1]
+    if(x < 0): return -1
+    if(x >= shape_x): return -1
+    if(y < 0): return -1
+    if(y >= shape_y): return -1
+
+    #Return the pixel at the given nav mesh point
+    return unet_nav_mesh[y,x]
 
   #Gets the current pixel that this pixel is on 
   #unet_nav_mesh - The unet nav mesh being traversed
@@ -546,27 +623,106 @@ class Probe():
     next_step = self.steps + 1
     return self.getPositionFromSteps(next_step)
 
+  #Is the given pixel value on? Pixels are just on 1 or off 0
+  def isPixelOnFromVal(self, pixel_val):
+    return (pixel_val > 0)
+
+  def isPixelOn(self, unet_nav_mesh, x, y):
+    curr_pixel = self.getPixelAtPos(unet_nav_mesh, x, y)
+    return self.isPixelOnFromVal(curr_pixel)
+
+  #Is the current pixel that this probe occupies on?
+  def isCurrentPixelOn(self, unet_nav_mesh):
+    return self.isPixelOn(unet_nav_mesh, self.getCurrentPosition()[0], self.getCurrentPosition()[1])
+
+  #Searches the proximity and at this point to determine if the kernel of kernel_size,kernel_size has at least one on pixel inside of it.
+  #   If so, returns the coordinates of the hit pixel that was within this kernel
+  #   This finds edges even if the mask straight ahead has a small gap
+  #unet_nav_mesh - The navigation mesh
+  #kernel_radius - How many pixels from center to test for on pixel
+  #curr_x - Kernel x center position
+  #curr_y - Kernel y center position
+  #returns - The position the kernel had a hit on or -1,-1 if no hit at all
+  def getKernelPixelHit(self, unet_nav_mesh, kernel_radius, curr_x, curr_y):
+
+    for x in range(-kernel_radius, kernel_radius):
+      for y in range(-kernel_radius, kernel_radius):
+
+        loop_x = curr_x + x
+        loop_y = curr_y + y
+
+        #If the current point pixel is on then return the hit
+        if(self.isPixelOn(unet_nav_mesh, loop_x,loop_y)):
+
+          #Return the hit
+          return [loop_x, loop_y]
+
+    #No hit
+    return [-1.0,-1.0]
+
+  #Reverse this bounding box's direction in that it will go the exact other way (e.g. if going north will go south) 
+  def reverseDirection(self):
+
+    if(self.move_direction == Direction.North):
+      self.move_direction = Direction.South
+      return 
+    elif(self.move_direction == Direction.East):
+      self.move_direction = Direction.West
+      return 
+    elif(self.move_direction == Direction.South):
+      self.move_direction = Direction.North
+      return 
+    else:
+      self.move_direction = Direction.East
+      
+
+  #Mark this probe as a bounding box deflater rather than an inflater. 
+  #   Reverse its order as well
+  def markAsDeflationary(self):
+
+    #Reverse this probe's direction and allow it to glide on negative space now
+    self.reverseDirection()
+    self.mask_space_type = MaskSpaceType.NegativeSpace
+
   #Gets the next pixel this probe would traverse to
   #unet_nav_mesh - The unet predicted nav mesh that this probe can travel on
   def getNextPixel(self, unet_nav_mesh):
     next_pos = self.getNextPosition()
-    return unet_nav_mesh[next_pos[0],next_pos[1]]
-
-  #Is the given pixel value on? Pixels are just on 1 or off 0
-  def isPixelOn(self, pixel_val):
-    return (pixel_val > 0)
-
-  #Is the current pixel that this probe occupies on?
-  def isCurrentPixelOn(self):
-    curr_pixel = self.getPixelAtPos(self.getCurrentPosition())
-    return self.isPixelOn(curr_pixel)
-
+    return self.getPixelAtPos(unet_nav_mesh, next_pos[0], next_pos[1])
+  
   #Is the next pixel this probe would traverse to on?
   #unet_nav_mesh - The nav mesh that this probe can traverse
   #return - Is the next pixel this probe would travel to on?
   def isNextPixelOn(self, unet_nav_mesh):
     next_pixel = self.getNextPixel(unet_nav_mesh)
-    return self.isPixelOn(next_pixel)
+    return self.isPixelOnFromVal(next_pixel)
+
+  #Use kernel to determine if the next block will hit a navigation area for this probe
+  def getNextPosKernelHit(self, unet_nav_mesh):
+    
+    #Get the next position x and y coordinates
+    next_pos = self.getNextPosition()
+    next_pos_x = next_pos[0]
+    next_pos_y = next_pos[1]
+
+    #Get if the kernel would hit anything when traversing to its next position
+    next_kernel_hit_pos = self.getKernelPixelHit(unet_nav_mesh, next_pos_x, next_pos_y) 
+
+    #Returns the hit position or lack of hit position
+    return next_kernel_hit_pos
+  
+
+  #Has this probe moved for its entire lifespan and cannot make any more steps?
+  #returns - True if reached max life, or False if still has steps left before reaching max life
+  def isDead(self):
+    return self.steps >= self.max_life
+
+
+  #Sets the number of steps this probe can take before "dying"
+  #max_steps - Maximum number of steps this probe can take before dying
+  def setLifespan(self, max_life):
+    self.max_life = max_life
+
   
   #Move one pixel (increments number of steps of this probe)
   def move(self):
@@ -586,15 +742,22 @@ class Probe():
     pos = self.getCurrentPosition()
     current_pixel_class = self.getCurrentPixel(unet_nav_mesh)
     #While on a unet mesh and in-bounds for the image then
-    while(current_pixel_class > 0 and pos[0] >= 0 and pos[0] < mesh_size_x and pos[1] >= 0 and pos[1] < mesh_size_y):
+    #Dies before hitting the edge pixels
+    while(current_pixel_class > 0 and pos[0] > 0 and pos[0] < mesh_size_x - 1 and pos[1] > 0 and pos[1] < mesh_size_y - 1):
 
-      #If the next pixel is an on pixel, then, we can traverse to it. Also update the position.    
-      if(self.isNextPixelOn(unet_nav_mesh)):
+      #See if the probe can move to its next spot based on if its moving in positive space or negative space.
+      if(self.mask_space_type == MaskSpaceType.PositiveSpace):
+        can_move_next = self.isNextPixelOn(unet_nav_mesh) 
+      else:
+        can_move_next = not self.isNextPixelOn(unet_nav_mesh) 
+
+      #If this probe can still move and has not expired, then
+      if(can_move_next and not self.isDead()):
 
         #Move forward and update position
         self.move()
         pos = self.getCurrentPosition()
-
+        
       #Hit the end of the navmesh
       else:
 
@@ -613,14 +776,16 @@ class Probe():
     bb_min_y = bounding_box.getMin()[1]
 
     #Get the current position of this probe
-    probe_x_pos = self.getCurrentPosition[0]
-    probe_y_pos = self.getCurrentPosition[1]
+    probe_x_pos = self.getCurrentPosition()[0]
+    probe_y_pos = self.getCurrentPosition()[1]
 
     #The inflated bounding box values
     inflated_min_x = bb_min_x
     inflated_min_y = bb_min_y
     inflated_max_x = bb_max_x
     inflated_max_y = bb_max_y
+
+    #TO_DO: FOR DEFLATIONARY BOUNDING BOXES, DEFLATE
 
     #Inflate bounding box based on direction
     if(self.move_direction == Direction.North):
@@ -637,7 +802,6 @@ class Probe():
 
     #Return the inflated bounding box
     return bounding_box
-
 
 
 #Reads the given text file with the given filename
@@ -763,12 +927,16 @@ def get_cycle_type_descriptor(cycle_type):
 
 #Gets the string descriptor for a model type (e.g. training_ or testing_)
 #model_type - The model type, type of ModelType
+#segmentation_type (Optional) - The type of segmentation done through segmentation
 #returns - The label for a model type (e.g. training_)
-def get_model_type_descriptor(model_type):
+def get_model_type_descriptor(model_type, segmentation_type = ModelSegmentationType.UNET):
   if(model_type == ModelType.YOLO):
     return "yolo_"
-  elif(model_type == ModelType.UNET):
-    return "unet_"
+  elif(model_type == ModelType.SEGMENTATION):
+    if(segmentation_type == ModelSegmentationType.UNET):
+      return "unet_"
+    else:
+      return "deeplab_"
   else:
     return "yolo_seg"
     
@@ -777,15 +945,15 @@ def get_model_type_descriptor(model_type):
 #model_type - The type of model being run
 #metric_type - Type of metric used (type of MetricType)
 #cycle_type - What cycle is this in? Training? Validation? Testing?
-#iou (Optional) - If this metric file is for a specific IoU threshold. If set to -1, is ignored
-def get_metric_file_path(model_type, metric_type, cycle_type):
+#segmentation_type (Optional) - The type of segmentation being done
+def get_metric_file_path(model_type, metric_type, cycle_type, segmentation_type = ModelSegmentationType.UNET):
 
   #Base path where all metric logs get saved to...
   metric_base_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/logs/"        #Linux
   #metric_base_path = "C:\\Phee\\Class\\Capstone\\metrics\\"                              #WIN
 
   #Get the descriptive value of the model type (yolo, unet, or yoloseg)
-  model = get_model_type_descriptor(model_type)
+  model = get_model_type_descriptor(model_type, segmentation_type)
 
   #Get the prefix for the current cycle being run (training, validation, or testing)
   prefix = get_cycle_type_descriptor(cycle_type)
@@ -802,10 +970,11 @@ def get_metric_file_path(model_type, metric_type, cycle_type):
 #cycle_type - Where in the cycle this is? Training? Validation? Testing? See CycleType enum.
 #metric_val - The value to output
 #iou - If applicable, the iou threshold for this metric. Different iou metrics save to different metric output files.
-def write_metric(epoch, metric_type, cycle_type, metric_val, iou=-1.0):
+#segmentation_type (Optional) - If this is a segmentation model, the segmentation model type
+def write_metric(epoch, model_type, metric_type, cycle_type, metric_val, iou=-1.0, segmentation_type = ModelSegmentationType.UNET):
 
   #Get the filename to write to
-  metric_file_path = get_metric_file_path(MODEL_TYPE, metric_type, cycle_type)
+  metric_file_path = get_metric_file_path(model_type, metric_type, cycle_type, segmentation_type)
 
   #Write to file
   write_file(epoch, str(metric_type) + "," + str(cycle_type) + "," + str(iou) + "," + str(metric_val), metric_file_path)
@@ -924,10 +1093,12 @@ class EvaluateCOCOMetricsCallback(keras.callbacks.Callback):
 
 #Write individual metrics to their own files based on the current epoch (or -1 if no epoch), cycle (training, validation, testing) as well
 #epoch - The current epoch
+#model_type - The type of model to write metric for
 #metric_type - Type of metric used (type of MetricType)
 #cycle_type - What cycle is this in? Training? Validation? Testing?
-def write_metric_file(epoch, metric_type, cycle_type, metric_val):
-  metric_file_path = get_metric_file_path(metric_type, cycle_type)
+#segmentation_type - The type of segmentation being done (unet or deeplab) if this is a segmentation process running
+def write_metric_file(epoch, model_type, metric_type, cycle_type, metric_val, segmentation_type):
+  metric_file_path = get_metric_file_path(model_type, metric_type, cycle_type, segmentation_type)
   write_file(epoch, metric_val, metric_file_path)
 
 #Given box x and y positioning values for predicted and actual, get the box intersection (used for iou and dice metrics)
@@ -978,8 +1149,9 @@ def get_box_intersection(start_predx, start_predy, start_actx, start_acty, end_p
 #bounding_boxes - Array of bounding boxes
 #x - Pixel point x
 #y - Pixel point y
+#proximity_method - The proximity method to use for getting the shortest distance to a bounding box center. Dist from center? Dist from bounding box edge?
 #returns - Bounding box with the shortest distance to pixel point x,y
-def get_shortest_dist_bounding_box(bounding_boxes, x, y):
+def get_shortest_dist_bounding_box(bounding_boxes, x, y, proximity_method : BoundingBoxProximityDetermination):
 
   #No bounding boxes pass in to get shortest for
   if(len(bounding_boxes) == 0):return None
@@ -994,9 +1166,19 @@ def get_shortest_dist_bounding_box(bounding_boxes, x, y):
       #Get the current bounding box in the loop
       curr_bounding_box : BoundingBox = bounding_boxes[bbox_index]
 
-      #Is this bounding box closer than the winning bounding box?
-      if(curr_bounding_box.isCloserToPointThan(winning_bounding_box)):
-        winning_bounding_box = curr_bounding_box
+      #Get the vector distance fom this bounding box's center to the given point
+      if(proximity_method == BoundingBoxProximityDetermination.Center):
+      
+        #Is this bounding box closer than the winning bounding box?
+        if(curr_bounding_box.isCloserToPointThan(winning_bounding_box, x, y)):
+          winning_bounding_box = curr_bounding_box
+
+      #Get the vector distance from the point that is closest on the edge of the bounding box to the given x,y point
+      else:
+        
+        if(curr_bounding_box.isCloserToEdgeThan(winning_bounding_box, x, y)):
+          winning_bounding_box = curr_bounding_box
+
 
     #return the winning bounding box
     return winning_bounding_box
@@ -1012,6 +1194,7 @@ def get_shortest_dist_bounding_box(bounding_boxes, x, y):
 #bbox_list - The list of bounding boxes to insert into 
 #x - The pixel x coordinate
 #y - The pixel y coordinate
+#proximity_method - Which point on a bounding box to use to insert it by promity? Center? Bounding box perimeter (edges)?
 #returns - The new list of bounding boxes with the bounding box inserted
 def insert_bounding_box_by_vec_dist(new_bbox : BoundingBox, bbox_list, x, y):
 
@@ -1029,18 +1212,21 @@ def insert_bounding_box_by_vec_dist(new_bbox : BoundingBox, bbox_list, x, y):
     for i in range(0, len(bbox_list)):
 
       #Current bounding box in the loop
-      loop_bbox = bbox_list[i]
+      loop_bbox : BoundingBox = bbox_list[i]
 
-      #If the current bounding box is closer than the loop bounding box, then, insert it in front of this bounding box
-      if(new_bbox.isCloserToPointThan(loop_bbox,x,y)):
+      #If this is a valid bounding box then
+      if(loop_bbox.isValid()):
 
-        #Mark it so that the new bounding box will be inserted in front of this bounding box and then exit the loop
-        insert_placement = i 
-        break
-          
+        #If the current bounding box is closer than the loop bounding box, then, insert it in front of this bounding box
+        if(new_bbox.isCloserToPointThan(loop_bbox,x,y)):
+
+          #Mark it so that the new bounding box will be inserted in front of this bounding box and then exit the loop
+          insert_placement = i 
+          break
+            
     #https://numpy.org/devdocs/reference/generated/numpy.insert.html
     #Insert this bounding box at its found position
-    np.insert(bbox_list, insert_placement, new_bbox)
+    bbox_list = np.insert(bbox_list, insert_placement, new_bbox)
 
   #Return the updated bounding box list
   return bbox_list
@@ -1092,13 +1278,13 @@ def determine_yoloseg_class(img_classes, img_boxes, img_index, x, y, unet_y_pred
 
   #If there exists multiple bounding boxes that contain this pixel, then, select the closest one 
   if(len(contained_bbox) > 1):
-    closest_bbox = get_shortest_dist_bounding_box(contained_bbox,x, y)
+    closest_bbox = get_shortest_dist_bounding_box(contained_bbox,x, y, BoundingBoxProximityDetermination.Center)
     if(closest_bbox != None):
       return closest_bbox.getClass()
 
   #If there are other bounding boxes not intersected at all with this pixel, then 
   if(len(other_bbox) > 0):
-      closest_bbox = get_shortest_dist_bounding_box(other_bbox, x, y)
+      closest_bbox = get_shortest_dist_bounding_box(other_bbox, x, y, BoundingBoxProximityDetermination.Perimeter)
       if(closest_bbox != None):
         return closest_bbox.getClass()
 
@@ -1119,16 +1305,16 @@ def determine_yoloseg_class(img_classes, img_boxes, img_index, x, y, unet_y_pred
 #y - The y position of the pixel
 #unet_y_pred - The unet-created nav mesh
 #returns - If the given pixel has a correct object detection
-def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, img_index, x, y, unet_y_pred):
+def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_class, img_index, x, y, unet_y_pred):
 
   #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
   predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, img_index, x, y, unet_y_pred)
-  actual_yolo_seg_class = determine_yoloseg_class(img_actual_classes, img_actual_boxes,img_index, x, y, unet_y_pred)
 
-  # #River mapping was wrong. Should be 2, not 4.
-  # if(predicted_yolo_seg_class == 4):
+  #Conversion - Lake in terms of unet vs. index for YOLO
+  if(predicted_yolo_seg_class == 0):
+     predicted_yolo_seg_class = 1
     
-  if(predicted_yolo_seg_class == actual_yolo_seg_class):
+  if(predicted_yolo_seg_class == img_actual_class):
     return True
   else:
     return False
@@ -1141,10 +1327,8 @@ def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_cla
 #unet_y_pred - The unet y predicted values
 #unet_y_actual - The unet y actual values
 #metric_type - The desired metric type
-def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual):
-
-  #Make sure a predicted class is used for the unet prediction. Any class that is not nothing will just be "on" in this case
-  unet_y_pred = np.argmax(unet_y_pred, -1, keepdims=True)
+#segmentation_type - The segmentation type being used for this segmentation model
+def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, segmentation_type):
 
   #The predicted classes and boxes, where, each index is locked to the image index, and has an array of the classes and boxes, index-locked
   yolo_y_pred_classes = yolo_y_pred["classes"]
@@ -1160,8 +1344,8 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
 
   #Get actual pixel shape to march through in loop. Typically x and y dims will always be 512 and 512. Inst
   img_count = unet_y_actual.shape[0]
-  shape_x = unet_y_actual.shape[1]
-  shape_y = unet_y_actual.shape[2]
+  shape_y = unet_y_actual.shape[1]
+  shape_x = unet_y_actual.shape[2]
 
   #Convert dictionaries to simple numpy jagged arrays
   unet_y_pred_np = keras.ops.convert_to_numpy(unet_y_pred)
@@ -1193,6 +1377,8 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   #For each image in the image list
   for img_index in range(0, img_count):
 
+    write_log(-1, "Calculating metrics with image " + str(img_index))
+
     #Gets the predicted classes and boxes for this image
     img_pred_classes = yolo_y_pred_classes_np[img_index]
     img_pred_boxes = yolo_y_pred_boxes_np[img_index]
@@ -1212,6 +1398,8 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
 
         #Get the actual pixel in this position. is it water?
         act_pixel = unet_y_act_np[img_index,x,y]
+        if(act_pixel == 2):
+          act_pixel = 3       #UNet is using lake-river while the yolo model had 5 classes
         is_actual_water = (act_pixel > 0)
 
         #Get the predicted pixel and actual pixel at this point (x,y) for an image...
@@ -1245,31 +1433,39 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
         if(is_pred_water):
 
             #If the object detection class is correct here, then, add to the total items that are correct for both unet AND yolo
-            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, img_index, x, y, unet_y_pred_np)):
+            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, act_pixel, img_index, x, y, unet_y_pred_np)):
               yolo_seg_predictions_correct += 1
 
               #If this is a true positive, then increment to total yolo correct as well.
               if(is_actual_water):
                 yolo_seg_pixels_correct += 1
 
-  #Calculate YOLOSEG true accuracy
-  yolo_seg_accuracy = yolo_seg_pixels_correct / total_pred_water_pixels
+    #Calculate YOLOSEG true accuracy
+    yolo_seg_accuracy = yolo_seg_pixels_correct / total_pred_water_pixels
 
-  #Recall equals true positives over all positives
-  yolo_seg_recall = true_positives / total_pred_or_true_water_pixels
+    #Recall equals true positives over all positives
+    yolo_seg_recall = true_positives / total_pred_or_true_water_pixels
 
-  #Precision equals correct_true_positives (yolo_seg_pixels_correct) over all positives (total_pred_water_pixels)
-  yolo_seg_precision = yolo_seg_pixels_correct / total_pred_water_pixels
+    #Precision equals correct_true_positives (yolo_seg_pixels_correct) over all positives (total_pred_water_pixels)
+    yolo_seg_precision = yolo_seg_pixels_correct / total_pred_water_pixels
 
-  #P1 score is 
-  yolo_seg_f1_score = 2 * ((yolo_seg_precision * yolo_seg_recall) / (yolo_seg_precision + yolo_seg_recall))
+    #P1 score is 
+    yolo_seg_f1_score = 2 * ((yolo_seg_precision * yolo_seg_recall) / (yolo_seg_precision + yolo_seg_recall))
+
+    #Output the yolo seg accuracy
+    write_log(-1, "End of image " + str(img_index) + " calculations... ")
+    write_log(-1, "CURRENT YOLO_SEG accuracy = " + str(yolo_seg_accuracy))
+    write_log(-1, "CURRENT YOLO_SEG recall = " + str(yolo_seg_recall))
+    write_log(-1, "CURRENT YOLO_SEG precision = " + str(yolo_seg_precision))
+    write_log(-1, "CURRENT YOLO_SEG f1 score = " + str(yolo_seg_f1_score))
+    write_log(-1, "Images done: " + str(img_index))
 
   #Output the yolo seg accuracy
   write_log(-1, "Total YOLO_SEG accuracy = " + str(yolo_seg_accuracy))
   write_log(-1, "Total YOLO_SEG recall = " + str(yolo_seg_recall))
   write_log(-1, "Total YOLO_SEG precision = " + str(yolo_seg_precision))
   write_log(-1, "Total YOLO_SEG f1 score = " + str(yolo_seg_f1_score))
-  write_metric(-1, MetricType.YOLOSEGACCURACY, CycleType.TESTING, yolo_seg_accuracy)
+  write_metric(-1, ModelType.SEGMENTATION, MetricType.YOLOSEGACCURACY, CycleType.TESTING, yolo_seg_accuracy)
             
           
 
@@ -1291,8 +1487,9 @@ def get_seg_metrics_class(y_pred, y_actual, specific_class, metric_type):
 
   #Get the: 0 - number of indices, 1 - height of image ground truth, 2 - width of image ground truth,
   instances = y_actual.shape[0]
-  shape_x = y_actual.shape[1]
-  shape_y = y_actual.shape[2]
+  shape_y = y_actual.shape[1]
+  shape_x = y_actual.shape[2]
+
 
   #Counters
   correct_predictions = 0
@@ -1673,7 +1870,7 @@ def fetch_data(model_type, data, cycle_type, all_img_count):
 
   #Testing data does not get shuffled. Also, get full set of a ragged batch when testing
   if(cycle_type ==  CycleType.TRAINING or cycle_type == CycleType.VALIDATION):
-    ds = ds.shuffle(BATCH_SIZE * 4)
+    ds = ds.shuffle(data_len)
     ds = ds.ragged_batch(BATCH_SIZE, drop_remainder=False)
   else:
     ds = ds.ragged_batch(data_len, drop_remainder=False)
@@ -1746,13 +1943,14 @@ def get_augmentation_layers(class_count, model_type):
 #y_actual - The Y Actual values for UNET
 #specific_class - The specific class to get metrics for. -1 Means ALL 
 #curr_class_metric_type - The pixel metric used 
-def output_unet_metrics_per_class(y_pred, y_actual, specific_class, curr_pixel_metric_type):
+#segmentation_type - Segmentation type used for segmentation
+def output_unet_metrics_per_class(y_pred, y_actual, specific_class, curr_pixel_metric_type, segmentation_type):
   step_str = "Overall "
   if(specific_class != -1):
     step_str = "Class [" + CLASS_LIST[specific_class + 1] + "]"   #Add 1 because unet has a "nothing" class as class 0, where as class 0 for YOLO is "Lake"
   pixel_metric = get_seg_metrics_class(y_pred, y_actual, specific_class, curr_pixel_metric_type)
   write_log(-1, step_str + get_metric_type_descriptor(curr_pixel_metric_type) + str(pixel_metric))
-  write_metric(specific_class, curr_pixel_metric_type, CycleType.TESTING, pixel_metric)
+  write_metric(specific_class, ModelType.SEGMENTATION, curr_pixel_metric_type, CycleType.TESTING, pixel_metric, segmentation_type)
 
 #Outputs the current yolo metrics
 #y_pred - The Y Predicted values for YOLO
@@ -1774,8 +1972,8 @@ def output_yolo_metrics_per_class(y_pred, y_actual, specific_class, curr_class_m
       step_str = "Class [" + CLASS_LIST[specific_class] + "]"
     write_log(-1, step_str + get_metric_type_descriptor(curr_class_metric_type) + " [IoU=" + str(iou_threshold) + ")] = " + str(class_metric))
     write_log(-1, step_str + get_metric_type_descriptor(curr_box_metric_type) + "[IoU=" + str(iou_threshold) + ")] = " + str(box_metric))
-    write_metric(specific_class, curr_class_metric_type, CycleType.TESTING, class_metric, iou_threshold)
-    write_metric(specific_class, curr_box_metric_type, CycleType.TESTING, box_metric, iou_threshold)
+    write_metric(specific_class, ModelType.YOLO, curr_class_metric_type, CycleType.TESTING, class_metric, iou_threshold)
+    write_metric(specific_class, ModelType.YOLO, curr_box_metric_type, CycleType.TESTING, box_metric, iou_threshold)
 
 
 #logs the actual precision and recall per class
@@ -1786,20 +1984,21 @@ def output_yolo_metrics_per_class(y_pred, y_actual, specific_class, curr_class_m
 #yolo_y_actual - The YOLO y actual values if using yolo seg
 #unet_y_pred - The UNET y predicted values if using yolo seg
 #unet_y_actual - The UNET y actual values if using yolo seg
-def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yolo_y_actual = None, unet_y_pred = None, unet_y_actual = None):
+#segmentation_type (Optional) - The segmentation type being used for this model
+def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yolo_y_actual = None, unet_y_pred = None, unet_y_actual = None, segmentation_type = ModelSegmentationType.UNET):
 
   #Messages to write to the log / print out to the console
   log_messages = []
 
   #Classes to use. -1 is All, 0 is lakes, 1 is rivers
-  class_indices = [-1, 0, 1]
+  class_indices = [-1, 0, 2]
 
   #Get the class and box metrics to be updated in the loop below (for general model and per class)
   class_metrics = [MetricType.CLASSACCURACY, MetricType.CLASSPRECISION, MetricType.CLASSRECALL, MetricType.CLASSF1]
   box_metrics = [MetricType.BOXACCURACY, MetricType.BOXPRECISION, MetricType.BOXRECALL, MetricType.BOXDICE]
   seg_metrics = [MetricType.PIXELACCURACY, MetricType.PIXELPRECISION, MetricType.PIXELRECALL, MetricType.PIXELDICE]
 
-  if(model_type == ModelType.YOLO or model_type == ModelType.UNET):
+  if(model_type == ModelType.YOLO or model_type == ModelType.SEGMENTATION):
     #For each class index, starting with "All" and then going into specific classes,
     for class_index in class_indices:
 
@@ -1814,13 +2013,13 @@ def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yo
         if(model_type == ModelType.YOLO):
           output_yolo_metrics_per_class(y_pred, y_actual, class_index, curr_class_metric_type, curr_box_metric_type)        
         #For UNET testing only
-        elif(model_type == ModelType.UNET):
+        elif(model_type == ModelType.SEGMENTATION):
           curr_pixel_metric_type = seg_metrics[metric_index]
-          output_unet_metrics_per_class(y_pred, y_actual, class_index, curr_pixel_metric_type)
+          output_unet_metrics_per_class(y_pred, y_actual, class_index, curr_pixel_metric_type, segmentation_type=segmentation_type)
 
   #This is YOLO seg (the final output for the production model. Do only once for performance reasons. All metrics will be calculated in one loop...)
   else:
-    output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual)
+    output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, segmentation_type)
 
 
         
@@ -1956,19 +2155,103 @@ def get_unet_backbone():
   model = keras.Model(inputs, outputs)
   return model
 
+#A deeplab convolution block taken from the Keras deeplabv3+ tutorial
+#Taken from here!!! https://keras.io/examples/vision/deeplabv3_plus/
+#NOT MY CODE- Taken from here: https://keras.io/examples/vision/deeplabv3_plus/
+def deeplab_convolution_block(
+    block_input,
+    num_filters=256,
+    kernel_size=3,
+    dilation_rate=1,
+    use_bias=False,
+):
+    x = layers.Conv2D(
+        num_filters,
+        kernel_size=kernel_size,
+        dilation_rate=dilation_rate,
+        padding="same",
+        use_bias=use_bias,
+        kernel_initializer=keras.initializers.HeNormal(),
+    )(block_input)
+    x = layers.BatchNormalization()(x)
+    return keras.ops.nn.relu(x)
 
 
+#A dilated spatial pyramid pooling block taken from the Keras deeplabv3+ tutorial
+#Taken from here!!! https://keras.io/examples/vision/deeplabv3_plus/
+#NOT MY CODE - Taken from here: https://keras.io/examples/vision/deeplabv3_plus/
+def DilatedSpatialPyramidPooling(dspp_input):
+    dims = dspp_input.shape
+    x = layers.AveragePooling2D(pool_size=(dims[-3], dims[-2]))(dspp_input)
+    x = deeplab_convolution_block(x, kernel_size=1, use_bias=True)
+    out_pool = layers.UpSampling2D(
+        size=(dims[-3] // x.shape[1], dims[-2] // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
 
+    out_1 = deeplab_convolution_block(dspp_input, kernel_size=1, dilation_rate=1)
+    out_6 = deeplab_convolution_block(dspp_input, kernel_size=3, dilation_rate=6)
+    out_12 = deeplab_convolution_block(dspp_input, kernel_size=3, dilation_rate=12)
+    out_18 = deeplab_convolution_block(dspp_input, kernel_size=3, dilation_rate=18)
+
+    x = layers.Concatenate(axis=-1)([out_pool, out_1, out_6, out_12, out_18])
+    output = deeplab_convolution_block(x, kernel_size=1)
+    return output
+
+#The base DeepLabV3+ Backbone taken from the Keras deeplabv3+ tutorial
+#!!!NOT MY CODE - TAKEN FROM HERE-- /examples/vision/deeplabv3_plus/#
+#TAKEN FROM HERE: /examples/vision/deeplabv3_plus/
+def DeeplabV3Plus(image_size, num_classes):
+    model_input = keras.Input(shape=(image_size, image_size, 3))
+    preprocessed = keras.applications.resnet50.preprocess_input(model_input)
+    resnet50 = keras.applications.ResNet50(
+        weights="imagenet", include_top=False, input_tensor=preprocessed
+    )
+    x = resnet50.get_layer("conv4_block6_2_relu").output
+    x = DilatedSpatialPyramidPooling(x)
+
+    input_a = layers.UpSampling2D(
+        size=(image_size // 4 // x.shape[1], image_size // 4 // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
+    input_b = resnet50.get_layer("conv2_block3_2_relu").output
+    input_b = deeplab_convolution_block(input_b, num_filters=48, kernel_size=1)
+
+    x = layers.Concatenate(axis=-1)([input_a, input_b])
+    x = deeplab_convolution_block(x)
+    x = deeplab_convolution_block(x)
+    x = layers.UpSampling2D(
+        size=(image_size // x.shape[1], image_size // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
+
+    #Updated - Need to add softmax as activation function to output probabilities instead of just raw logits. This is what unet  does.
+    #Wasn't training at all previously because of this.
+    model_output = layers.Conv2D(num_classes, kernel_size=(1, 1), padding="same", activation="softmax")(x)
+    return keras.Model(inputs=model_input, outputs=model_output)
+
+#https://keras.io/examples/vision/deeplabv3_plus/
+#Get a deeplab3+ backbone to use for segmentation
+#returns - The Deeplabv3+ backbone to use for segmentation
+def get_deeplabv3plus_backbone():
+  
+  #Added my own parameters here. FILESIZE is the # of pixels in one dimension for an image.
+  #   class_count is the number of classes (length of the class array)
+  return DeeplabV3Plus(FILESIZE, class_count)
 
 
 #https://keras.io/examples/vision/oxford_pets_image_segmentation/
 #Perform segmentation model training, given a training dataset and validation dataset
+#segmentation_model_type - The segmentation model type being used
 #train_ds - The training dataset
 #val_ds - The validation dataset (validated during training)
-def seg_train_model(train_ds, val_ds):
+def seg_train_model(segmentation_model_type,train_ds, val_ds):
 
   #Construct the u-net backbone
-  seg_model = get_unet_backbone()
+  if(segmentation_model_type == ModelSegmentationType.UNET):
+    seg_model = get_unet_backbone()
+  else:
+    seg_model = get_deeplabv3plus_backbone()
 
   #Also built from https://deeplearningwithpython.io/chapters/chapter11_image-segmentation/ as a src
   #What do these do?
@@ -2006,8 +2289,8 @@ def seg_train_model(train_ds, val_ds):
   #What do these do?
     #ModelCheckpoint - Saves the weights from the model when running. This currently not used, but, might be later. Only saves weights if the metrics improve
     #EvaluateSegMetricsCallback - Evaluates the segmentation model with metrics such as pixel accuracy
-  model_path = get_path(PathType.MODEL, ModelType.UNET)
-  seg_checkpoint_path = get_path(PathType.CHECKPOINT, ModelType.UNET)
+  model_path = get_path(PathType.MODEL, ModelType.SEGMENTATION, YOLOTrainingSource.OriginalImages, segmentation_model_type)
+  seg_checkpoint_path = get_path(PathType.CHECKPOINT, ModelType.SEGMENTATION, YOLOTrainingSource.OriginalImages, segmentation_model_type)
   callbacks = [keras.callbacks.ModelCheckpoint(filepath=seg_checkpoint_path, save_best_only=True), EvaluateSegMetricsCallback(data=val_ds, save_path=model_path)]
 
   #https://keras.io/examples/vision/oxford_pets_image_segmentation/
@@ -2078,7 +2361,7 @@ def yolo_train_model(train_ds, val_ds):
   #https://keras.io/examples/vision/yolov8/
   #https://github.com/keras-team/keras-cv/issues/2095 (as a code reference)
   #Precision and recall: https://stackoverflow.com/questions/43076609/how-to-calculate-precision-and-recall-in-keras
-  model_path = get_path(PathType.MODEL, ModelType.YOLO)
+  model_path = get_path(PathType.MODEL, ModelType.YOLO, YOLOTrainingSource.OriginalImages)
   yolo.fit(
       train_ds,
       validation_data=val_ds,
@@ -2110,7 +2393,7 @@ def visualize_training_data(train_ds, bounding_box_format):
 #y_pred - The predicted bounding boxes
 #num_columns - The number of columns to show
 #num_rows - The number of rows to show
-def visualize_testing_data(y_actual, y_pred, num_columns, num_rows, images, bou):
+def visualize_testing_data(y_actual, y_pred, num_columns, num_rows, images):
       
   #Visualization for YOLO
   #https://keras.io/examples/vision/yolov8/
@@ -2126,6 +2409,25 @@ def visualize_testing_data(y_actual, y_pred, num_columns, num_rows, images, bou)
       font_scale=1,
       class_mapping=class_mapping,
 
+  )
+
+
+#Show segmentation masks with comparisons between (from left to right) the image, the true mask, and, the predicted mask
+#y_actual - The true mask
+#y_pred - The predicted mask
+#num_columns - The number of images per column to show 
+#num_rows - The number of images per row to show
+#images - The images to show, index-locked with ground truth masks and predicted masks
+#returns - A segmentation mask gallery
+def visualize_masks(y_actual, y_pred, num_columns, num_rows, images):
+  visualization.plot_segmentation_mask_gallery(
+    images=images,
+    y_pred=y_pred,
+    y_true=y_actual,
+    value_range=(0,255),
+    num_classes=class_count,
+    rows=num_rows,
+    cols=num_columns
   )
 
 
@@ -2205,119 +2507,155 @@ def getClassIndexFromName(classname) -> int:
     current_class_name = CLASS_LIST[i]
     if(current_class_name == classname):
       return i
-  
-  #Class name has not been found
-  return -1
-
-#Given the class name, convert it to the class index
-#classname (string) - The name of the class to convert to an index - must match values in CLASS_LIST
-def getClassIndexFromName(classname) -> int:
-  for i in range(0,len(CLASS_LIST)):
-    current_class_name = CLASS_LIST[i]
-    if(current_class_name == classname):
-      return i
   #
   #Class name has not been found
   return -1
 
+#These probes will deflate the bounding box rather than inflating it...
+#probe_array - The array of probes, all to be marked as deflationary to the YOLO bounding box rather than inflationary
+#returns - The probes, now marked as deflationary and using negative space
+def mark_probes_as_deflationary(probe_array):
+    
+  #For each probe, mark as deflationary
+  for i in range(0, len(probe_array)):
+    probe_array[i].markAsDeflationary()
 
-#Is the given location a valid navigation mesh position?
-#unet_predicted_masks - All unet predictions as navigation meshes
-#img_index - The image index that is index-locked with the current YOLO image with its bounding boxes being inflated.
-#x - The pixel x position
-#y - The pixel y position
-#returns - If the current position is on a unet prediction mesh pixel that is on (True), or off (False)
-def is_valid_probe_start(unet_predicted_masks, img_index, x, y):
-  return (unet_predicted_masks[img_index,x,y] > 0)
+  #Return updated probes as deflationary
+  return probe_array
+
+#Given an array of probes, is at least one of these probe in the given nav mesh?
+def has_probe_in_mask(unet_nav_mesh, probe_array):
+
+  #For each probe, test if it's on a nav mesh
+  for i in range(0, len(probe_array)):
+    curr_probe : Probe = probe_array[i]
+    if(curr_probe.isCurrentPixelOn(unet_nav_mesh)):
+      return True
+
+  #None of these probes are on a navigation mesh
+  return False
+
 
 #Get all valid probes to use for the given bounding box
-#unet_predicted_masks - The predicted u net mask as a nav mesh
+#unet_nav_mesh - The predicted u net mask as a nav mesh
 #bounding_box - The bounding box to get the probes for
+#mask_space_type (Optional) - Type of mask space to get the probe for. If For positive space, will glide on masks.
+#     if in negative space, will glide in non-masked space.
 #returns - Collection of valid probes for the given bounding box
-def get_yolo_box_probes(unet_predicted_masks, bounding_box : BoundingBox):
+def get_yolo_box_probes(unet_nav_mesh, bounding_box : BoundingBox, mask_space_type : MaskSpaceType = MaskSpaceType.PositiveSpace):
 
+  #Why round? Bug where these were decimals because was getting exact size of bb. Need to be converted to int units to be pixel coords.
   #Get min and max positions for bounding box
   bb_min = bounding_box.getMin()
   bb_max = bounding_box.getMax()
   bb_center = bounding_box.getCenter()
-  minX = bb_min[0]
-  minY = bb_min[1]
-  centerX = bb_center[0]
-  centerY = bb_center[1]
-  maxX = bb_max[0]
-  maxY = bb_max[1]
+  minX = int(round(bb_min[0]))
+  minY = int(round(bb_min[1]))
+  centerX = int(round(bb_center[0]))
+  centerY = int(round(bb_center[1]))
+  maxX = int(round(bb_max[0]))
+  maxY = int(round(bb_max[1]))
+
+  #Get x and y distance from center to edges
+  x_center_dist = int(round(bounding_box.getRadiusX()))
+  x_half_center_dist = int(round(x_center_dist / 2.0))
+  y_center_dist = int(round(bounding_box.getRadiusY()))
+  y_half_center_dist = int(round(y_center_dist / 2.0))
 
   #Get positions for probes
-  posN = [maxY, centerX]
-  posNE = bb_max
-  posE = [centerY, maxX]
-  posSE = [minY, maxX]
-  posS = [minY, centerX]
-  posSW = bb_min
-  posW = [centerY, minX]
-  posNW = [maxY, minX]
-  posCenter = [centerX, centerY];
+  posN = [centerX, maxY]
+  Pos_M_N_NE = [centerX + x_half_center_dist, maxY]
+  posNE = [maxX, maxY]
+  Pos_M_NE_E = [maxX, centerY + y_half_center_dist]
+  posE = [maxX, centerY]
+  Pos_M_E_SE = [maxX, centerY - y_half_center_dist]
+  posSE = [maxX, minY]
+  Pos_M_SE_S = [centerX + x_half_center_dist, minY]
+  posS = [centerX, minY]
+  Pos_M_S_SW = [centerX - x_half_center_dist, minY]
+  posSW = [minX, minY]
+  Pos_M_SW_W = [minX, centerY - y_half_center_dist]
+  posW = [minX, centerY]
+  Pos_M_W_NW = [minX, centerY + y_half_center_dist]
+  posNW = [minX, maxY]
+  Pos_M_NW_N = [centerX - x_half_center_dist, maxY]
+  posCenter = [centerX, centerY]
 
-  #Get probes to use
-  testing_probes =[]
-  probe_n_up = Probe(posN, Direction.North)
-  testing_probes.append(probe_n_up)
+  probe_n_north = Probe(posN, Direction.North, mask_space_type)
 
-  probe_ne_up = Probe(posNE, Direction.North)
-  probe_ne_east = Probe(posNE, Direction.East)
-  testing_probes.append(probe_ne_up)
-  testing_probes.append(probe_ne_east)
+  probe_m_n_ne_north = Probe(Pos_M_N_NE, Direction.North, mask_space_type)
 
-  probe_e_up = Probe(posE, Direction.East)
-  testing_probes.append(probe_e_up)
+  probe_ne_north = Probe(posNE, Direction.North, mask_space_type)
+  probe_ne_east = Probe(posNE, Direction.East, mask_space_type)
 
-  probe_se_up = Probe(posSE, Direction.East)
-  probe_se_east = Probe(posSE, Direction.South)
-  testing_probes.append(probe_se_up)
-  testing_probes.append(probe_se_east)
+  probe_m_ne_e_east = Probe(Pos_M_NE_E, Direction.East, mask_space_type)
 
-  probe_s_down = Probe(posS, Direction.South)
-  testing_probes.append(probe_s_down)
+  probe_e_east = Probe(posE, Direction.East, mask_space_type)
 
-  probe_sw_up = Probe(posSW, Direction.South)
-  probe_sw_east = Probe(posSW, Direction.West)
-  testing_probes.append(probe_sw_up)
-  testing_probes.append(probe_sw_east)
+  probe_m_e_se_east = Probe(Pos_M_E_SE, Direction.East, mask_space_type)
 
-  probe_w_down = Probe(posW, Direction.West)
-  testing_probes.append(probe_w_down)
+  probe_se_south = Probe(posSE, Direction.South, mask_space_type)
+  probe_se_east = Probe(posSE, Direction.East, mask_space_type)
 
-  probe_nw_up = Probe(posNW, Direction.West)
-  probe_nw_east = Probe(posNW, Direction.North)
-  testing_probes.append(probe_nw_up)
-  testing_probes.append(probe_nw_east)
+  probe_m_se_s_south = Probe(Pos_M_SE_S, Direction.South, mask_space_type)
 
+  probe_s_south = Probe(posS, Direction.South, mask_space_type)
 
-  #TODO: If yolo bounding box outside mesh, maybe try to find outward most point of continuous mesh? Can try this if time permits.
+  probe_m_s_sw_south = Probe(Pos_M_S_SW, Direction.South, mask_space_type)
 
-  #Final probes to use which are actually on the mesh
+  probe_sw_south = Probe(posSW, Direction.South, mask_space_type)
+  probe_sw_west = Probe(posSW, Direction.West, mask_space_type)
+
+  probe_m_sw_w_west = Probe(Pos_M_SW_W, Direction.West, mask_space_type)
+
+  probe_w_west = Probe(posW, Direction.West, mask_space_type)
+
+  probe_m_w_nw_west = Probe(Pos_M_W_NW, Direction.West, mask_space_type)
+
+  probe_nw_north = Probe(posNW, Direction.North, mask_space_type)
+  probe_nw_west = Probe(posNW, Direction.West, mask_space_type)
+
+  probe_m_nw_n_north = Probe(Pos_M_NW_N, Direction.North, mask_space_type)
+
+  #Determine if any probes on a given edge are inside a mask. If so, we would want to inflate.
+  #   If none are in inside the mask and are not close to it, then, deflate
+  #Probes per edge
+  Probes_N = [probe_nw_north, probe_m_nw_n_north, probe_n_north, probe_m_n_ne_north, probe_ne_north]
+  Probes_E = [probe_ne_east, probe_m_ne_e_east, probe_e_east, probe_m_e_se_east, probe_se_east]
+  Probes_S = [probe_se_south, probe_m_se_s_south, probe_s_south, probe_m_s_sw_south, probe_sw_south]
+  Probes_W = [probe_sw_west, probe_m_sw_w_west, probe_w_west, probe_m_w_nw_west, probe_nw_west]
+
+  #Collection of each probe list
+  all_probe_lists = [Probes_N, Probes_E, Probes_S, Probes_W]
+
+  #Final list of all probes
   final_probes = []
 
-  #Test each probe to see if it's on the navigation mesh. If not, then do not use it.
-  #This will always have 9 directional probes including the center probe
-  for i in range(0, len(testing_probes)):
+  #For each probe list,
+  for probe_list in all_probe_lists:
 
-    #The current probe being tested
-    curr_probe = testing_probes[i]
+    probes_to_add = []
+    
+    #Check if each probe section has at least one probe in the mask. If not, these probes will deflate the bounding box instead
+    if(not has_probe_in_mask(unet_nav_mesh, probe_list)):
 
-    #Is this probe in a valid starting position?
-    if(is_valid_probe_start(curr_probe)):
-      final_probes.append(curr_probe)
+      #Probes are deflationary - add to temp list
+      probes_to_add = mark_probes_as_deflationary(probe_list)
+    else:
+      probes_to_add = probe_list
+
+    #Add final probes to one consistent list
+    for probeitem in probes_to_add:
+      final_probes.append(probeitem)
 
   return final_probes
-
   
 
 #Causes probes to fire from various bounds on the bounding box to try and find with some accuracy where the edge of the unet mask is.
-#unet_predicted_masks - The unet predicted masks used as a navigation mesh
+#unet_nav_mesh - The unet predicted masks used as a navigation mesh
 #bounding_box - The current bounding box being inflated
 #returns - The bounding box which may have been inflated or left untouched
-def inflate_bounding_box(unet_predicted_masks, bounding_box : BoundingBox):
+def inflate_bounding_box(unet_nav_mesh, bounding_box : BoundingBox):
 
   #From center, add these probe positions to the list: N, NE, E, SE, S, SW, W, NW
   #     X--X--X
@@ -2335,20 +2673,20 @@ def inflate_bounding_box(unet_predicted_masks, bounding_box : BoundingBox):
   #   <-X--X--X->
   #     v  v  v
   #
-  #The probes continue until they hit an edge of the bounding box
+  #The probes continue until they hit an either positive or negative mask edge depending on how the probe is set up
 
   #Get the locations to start probes from for this bounding box.
-  final_bounding_box_probes = get_yolo_box_probes(unet_predicted_masks, bounding_box)
+  final_bounding_box_probes = get_yolo_box_probes(unet_nav_mesh, bounding_box)
 
   #For each valid probe, simulate (traverse nav mesh in given direction) and then inflate the bounding box
   for i in range(0, len(final_bounding_box_probes)):
     curr_probe : Probe = final_bounding_box_probes[i]
     
     #Simulate for new bounds
-    curr_probe.simulate(unet_predicted_masks)
+    curr_probe.simulate(unet_nav_mesh)
 
     #inflate this bounding box
-    bounding_box = curr_probe.getInflatedBoundingBox(bounding_box)
+    bounding_box : BoundingBox = curr_probe.getInflatedBoundingBox(bounding_box)
 
   #return the bounding box that may have been inflated or left untouched
   return bounding_box
@@ -2359,17 +2697,19 @@ def inflate_bounding_box(unet_predicted_masks, bounding_box : BoundingBox):
 
 
 #Floods YOLO predictions using the unet masks as a navigation area for flooding probes. Expands YOLO box min/max to unet mask section min/max.
-#yolo_predicted_bounding_boxes - The YOLO box predictions - Will have the same
+#yolo_predicted_values - The YOLO box predictions - Will have the same. Has in this order: Class predictions, Bounding Boxes, confidence(?)
 #unet_predicted_masks - The predicted pixels per image for unet masks
-def get_flooded_yolo_predictions(yolo_predicted_bounding_boxes, unet_predicted_masks):
+def get_flooded_yolo_predictions(yolo_predicted_values, unet_predicted_masks):
 
   #Convert yolo predictions and unet predictions from Keras formatted jagged arrays to numpy multi-dimensional arrays. Easier to work with and faster...
-  yolo_predicted_bounding_boxes_np = tf.ops.convert_to_numpy(yolo_predicted_bounding_boxes)
-  unet_predicted_masks_np = tf.ops.convert_to_numpy(unet_predicted_masks)
+  yolo_predicted_values_np = keras.ops.convert_to_numpy(yolo_predicted_values)
+  unet_predicted_masks_np = keras.ops.convert_to_numpy(unet_predicted_masks)
 
   #Get the dimensions and bounds of our process. 
   #   For example, flooding probes must stay between pixel indices of 0 and bounds_x - 1 or bounds_y - 1 (img coords are zero-based)
   num_images = unet_predicted_masks_np.shape[0]
+
+  write_log(-1, "Inflating Bounding Boxes for Images... [" + str(num_images) + "] Images in Total...")
 
   #For each bounding box prediction, Get the probe locations to flood from. Probes will run on the edges of the bounding box and only if they are starting on 
   #    a valid navigation mesh pixel
@@ -2377,38 +2717,62 @@ def get_flooded_yolo_predictions(yolo_predicted_bounding_boxes, unet_predicted_m
   for img_index in range(0, num_images):
 
     #Get bounding boxes for this image location
-    img_bounding_boxes = yolo_predicted_bounding_boxes_np["boxes"][img_index]
+    img_bounding_boxes = keras.ops.convert_to_numpy(yolo_predicted_values["boxes"])[img_index]
+    img_predicted_classes = keras.ops.convert_to_numpy(yolo_predicted_values["classes"])[img_index]
 
     #Get the number of bounding boxes in this image
     img_bounding_box_count = len(img_bounding_boxes)
 
+    write_log(-1, "Inflating Bounding Boxes for Image " + str(img_index) + " with [" + str(img_bounding_box_count) + "] boxes...")
+
+    #Bounding box status output string...
+    status_output_str = ""
+
     #For each bounding box in this image, flood it and inflate it
     for img_bounding_box_index in range(0, img_bounding_box_count):
+
+      #Add to and show bounding box status string
+      status_output_str = status_output_str + "#"
+      write_log(-1, status_output_str)
 
       #The current bounding box in the loop
       curr_bounding_box_basedata = img_bounding_boxes[img_bounding_box_index]
 
+      #Get the current class for this bounding box (index-locked with bounding boxes)
+      curr_predicted_class = img_predicted_classes[img_bounding_box_index]
+
       #Create a new bounding box based on values from a numpy multi-dimensional array slice
-      curr_bounding_box = BoundingBox().setValsFromNPSlice(curr_bounding_box_basedata) 
+      curr_bounding_box : BoundingBox = BoundingBox(img_index, curr_predicted_class, -1.0,-1.0,-1.0,-1.0)
+      curr_bounding_box.setValsFromNPSlice(curr_bounding_box_basedata)
 
-      #TODO: SHOW FLOODING TEST RESULTS?
-      #if(OPTION_DEBUG_SHOW_FLOODING_TEST_RESULTS):
+      #If this is a valid bounding box, then
+      if(curr_bounding_box.isValid()):
 
-      #Inflate this bounding box using the unet mesh as a navigation mesh
-      new_bounding_box = inflate_bounding_box(unet_predicted_masks_np, curr_bounding_box)
+        #TODO: SHOW FLOODING TEST RESULTS?
+        #if(OPTION_DEBUG_SHOW_FLOODING_TEST_RESULTS):
 
-      #Set inflated bounding box
-      yolo_predicted_bounding_boxes_np["boxes"][img_index] = new_bounding_box
+        #Inflate this bounding box using the unet mesh as a navigation mesh
+        new_bounding_box : BoundingBox = inflate_bounding_box(unet_predicted_masks_np[img_index], curr_bounding_box)
+
+        #Set inflated bounding box
+        yolo_predicted_values["boxes"][img_index][img_bounding_box_index] = new_bounding_box.toTensor()
+
+      #NOT a valid bounding box. Since no bounding box after this bounding box will be valid (as they will all be padded) stop loop
+      else:
+
+        #Exits the loop (through the given image's bounding boxes)
+        break  
 
   #Return the final, inflated bounding boxes
-  return yolo_predicted_bounding_boxes
+  return yolo_predicted_values
   
 
 #Saves a segmentation image with accumulated pixels and the base image path
 #base_image_path - The base image path that will be used to save the segmentation image
 #img_pixels - The pixels to save for this image
+#segmentation_type - Type of segmentation model - UNET or Deeplab
 #returns - The path that this segmentation image was saved to.
-def save_seg_img(base_image_path, img_pixels):
+def save_seg_img(base_image_path, img_pixels, segmentation_type):
     
     #https://www.geeksforgeeks.org/python/python-pil-image-new-method/
     #Create new image
@@ -2417,7 +2781,10 @@ def save_seg_img(base_image_path, img_pixels):
 
     #https://www.w3schools.com/python/ref_string_replace.asp
     #Update image path to be a mask output path
-    mask_img_path = base_image_path.replace("seg_images","output_masks")
+    if(segmentation_type == ModelSegmentationType.UNET):
+      mask_img_path = base_image_path.replace("seg_images","output_masks")
+    else:
+      mask_img_path = base_image_path.replace("seg_images","deeplab_output_masks")
 
     #Saves the image
     new_img.save(mask_img_path)
@@ -2428,9 +2795,9 @@ def save_seg_img(base_image_path, img_pixels):
 #Given the segmentation mask data, save those masks to the output directory
 #image_paths - The collection of image paths passed into the model for training
 #y_pred - The Y predicted values
-def save_seg_masks(image_paths, y_pred):
+#segmentation_type - Segmentation type for the current model
+def save_seg_masks(image_paths, y_pred, segmentation_type):
 
-    #TODO: I THINK THIS IS SAVING IMAGES TO THE INCORRECT NUMBERS...
     #CHECK TRAINING FOR THAT AS WELL...
     
     #Seg image paths that were saved. Will be returned from this model and used to make predictions...
@@ -2474,7 +2841,7 @@ def save_seg_masks(image_paths, y_pred):
 
           #Saves the current segmentation image based on accumulated pixels
           img_save_path = image_paths[imgindex]
-          saved_seg_img_path = save_seg_img(img_save_path, img_pixels)
+          saved_seg_img_path = save_seg_img(img_save_path, img_pixels, segmentation_type)
 
           #Add the saved segmentation image path to the list of saved segmentation images
           seg_img_paths.append(saved_seg_img_path)
@@ -2483,14 +2850,14 @@ def save_seg_masks(image_paths, y_pred):
           img_pixels = []
 
 
-def get_predicted_data(model_type, dataset):
+def get_predicted_data(model_type, dataset, segmentation_type):
   if(model_type == ModelType.YOLO):
     #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
     yolo_model_path = get_path(PathType.MODEL, ModelType.YOLO)
     yolo_model = keras.saving.load_model(yolo_model_path)
-  elif(model_type == ModelType.UNET):      
+  elif(model_type == ModelType.SEGMENTATION):      
     #https://keras.io/api/models/model_saving_apis/model_saving_and_loading/
-    unet_model_path = get_path(PathType.MODEL, ModelType.UNET)
+    unet_model_path = get_path(PathType.MODEL, ModelType.SEGMENTATION, YOLOTrainingSource.OriginalImages, segmentation_type)
     unet_model = keras.saving.load_model(unet_model_path)
 
   #Load the images and either classes / bounding boxes, or prediction images
@@ -2522,7 +2889,8 @@ def get_predicted_data(model_type, dataset):
 #no_metrics - If true, will not show calculate or show metrics
 #yolo_dataset - Optional - If using yolo seg, the YOLO dataset
 #set_dataset - Optional - If using yolo seg, the segmentation dataset
-def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics, yolo_dataset = None, seg_dataset = None):
+#segmentation_type - Optional - The segmentation type being used for the segmentation model
+def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics, yolo_dataset = None, seg_dataset = None, segmentation_type = ModelSegmentationType.UNET):
 
 
   #YOLO-Seg gets predictions for both YOLO and UNet Segmentation. The other two run independently for testing each.
@@ -2534,14 +2902,13 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
 
     #Get Seg image paths
     seg_img_path_data = get_dataset(seg_dataset, cycle_type, all_img_count)
-    seg_img_paths = get_paths_from_dataset(seg_img_path_data, ModelType.UNET, ImageDataType.RGB)
-
+    seg_img_paths = get_paths_from_dataset(seg_img_path_data, ModelType.SEGMENTATION, ImageDataType.RGB)
 
     #Get the YOLO data to use for making predictions...
     yolo_ds = fetch_data(ModelType.YOLO, yolo_dataset, cycle_type, all_img_count)
 
     #Get predictions for yolo
-    yolo_y_pred = get_predicted_data(ModelType.YOLO, yolo_ds)
+    yolo_y_pred = get_predicted_data(ModelType.YOLO, yolo_ds, segmentation_type)
 
     #Load the images and either classes / bounding boxes, or prediction images
     #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
@@ -2549,15 +2916,18 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
     yolo_images, yolo_y_actual = next(iter(yolo_ds.take(1)))
 
     #Get the UNET data to use for making predictions...
-    unet_ds = fetch_data(ModelType.UNET, seg_dataset, cycle_type, all_img_count)
+    unet_ds = fetch_data(ModelType.SEGMENTATION, seg_dataset, cycle_type, all_img_count)
 
     #Load the images and either classes / bounding boxes, or prediction images
     #These are not from the model. They're taken from file, and, same data used for both YOLO and unet
-    print("Processing UNET Testing Images...")
+    seg_model_name = "UNET"
+    if(segmentation_type == ModelSegmentationType.DEEPLABV3PLUS):
+      seg_model_name = "DEEPLAB"
+    print("Processing " + seg_model_name + " Testing Images...")
     unet_images, unet_y_actual = next(iter(unet_ds.take(1)))
 
     #Get predictions for UNET
-    unet_y_pred = get_predicted_data(ModelType.UNET, unet_ds)
+    unet_y_pred = get_predicted_data(ModelType.SEGMENTATION, unet_ds, segmentation_type)
     
   else:
 
@@ -2573,7 +2943,7 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
     images, y_actual = next(iter(ds.take(1)))
 
     #Get the predicted data for the given model type if it's for individual yolo or unet
-    y_pred = get_predicted_data(model_type, ds)
+    y_pred = get_predicted_data(model_type, ds, segmentation_type)
 
   #Gets the the total segmentation and yolo prediction count - 
   # If individual, only one will have values
@@ -2582,18 +2952,18 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
   yolo_prediction_count = 0 
   if(model_type == ModelType.YOLO):
     yolo_prediction_count = y_pred["boxes"].shape[0]
-  elif(model_type == ModelType.UNET):
+  elif(model_type == ModelType.SEGMENTATION):
     segmentation_prediction_count = y_pred.shape[0]
   else:
     yolo_prediction_count = yolo_y_pred["boxes"].shape[0]
     segmentation_prediction_count = unet_y_pred.shape[0]
 
   #If this is a segmentation test save the segmentation images so that we can run YOLO on it next for the classification...
-  if(model_type == ModelType.UNET):
+  if(model_type == ModelType.SEGMENTATION):
       #If saving segmentation images is enabled, then
       if(OPTION_SAVE_SEG_IMAGES):
           #Save the segmentation images
-          save_seg_masks(img_paths, unet_y_pred)
+          save_seg_masks(img_paths, unet_y_pred, segmentation_type)
 
   #IF Yolo or UNET only, one of these will be zero. Will still report the correct number of predictions...
   total_pred =  yolo_prediction_count + segmentation_prediction_count
@@ -2612,7 +2982,10 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
     print("UNET Images: " + str(seg_image_count))
 
     #Do flooding for yolo predictions based on unet masks if set to do so
-    y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)    #Get just the predicted class index per pixel rather than confidence scores per class
+    unet_y_pred = np.argmax(unet_y_pred, axis=-1, keepdims=True)    #Get just the predicted class index per pixel rather than confidence scores per class
+
+    #Test
+    #visualize_masks(unet_y_actual, unet_y_pred, 5, 5, unet_images)
 
     #Should we flood YOLO boxes and inflate them to get better accuracy based on UNET Prediction Masks?
     if(OPTION_FLOOD_YOLO_BOXES_IN_TESTING):
@@ -2633,7 +3006,11 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
 
     #Model type is YOLO_SEG and should have special behavior
     if(model_type == ModelType.YOLO_SEG):
-      output_metrics_per_class(ModelType.YOLO_SEG, None, None, yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual)
+
+      #Test
+      visualize_masks(unet_y_actual, unet_y_pred, 5, 5, unet_images)
+
+      output_metrics_per_class(ModelType.YOLO_SEG, None, None, yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, segmentation_type)
 
     #Model type is YOLO or unet for individual testing
     else:
@@ -2655,14 +3032,14 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
             y_true=y_actual,
             y_pred=y_pred,
             scale=1,
-            rows=5,
-            cols=5,
+            rows=8,
+            cols=8,
             font_scale=1,
             class_mapping=class_mapping,
         )
 
       #If this is image segmentation, then...
-      elif(model_type == ModelType.UNET):
+      elif(model_type == ModelType.SEGMENTATION):
 
         #Get the predictions with the index of the BEST prediction in the final column (axis=-1 gets last column)
         y_pred_max = np.argmax(y_pred, axis=-1, keepdims=True)
@@ -2694,7 +3071,7 @@ def get_paths_from_dataset(dataset, model_type, image_data_type):
     test_img_paths = []
     test_mask_paths = []
 
-    if(model_type == ModelType.UNET):
+    if(model_type == ModelType.SEGMENTATION):
 
       #Loop through [ImgPath, MaskPath] dictionary
       for imgpath, maskpath in dataset:
@@ -2844,27 +3221,42 @@ def prepare_seg_data(img_full_paths, mask_full_paths):
 #path_type - The desired type of path to get, e.g. for images or model
 #model_type - The type of model being run
 #yolo_training_source - The source of images being trained on or viewed for YOLO, e.g. original images, prefab masks from roboflow, or, mask predictions from the unet model
+#segmentation_type - The model segmentation type if applicable
 #returns - The model path to load the model from or save the model to...
-def get_path(path_type, model_type, yolo_training_source = YOLOTrainingSource.OriginalImages):
+def get_path(path_type, model_type, yolo_training_source = YOLOTrainingSource.OriginalImages, segmentation_type = ModelSegmentationType.UNET):
 
   #Gets the model checkpoint path for image segmentation
   if(path_type == PathType.CHECKPOINT):
-    return "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/seg_chk.keras"  #LINUX
-    #return "C:\\Phee\\Class\\Capstone\\seg_chk.keras"                                     #WIN
+    if(segmentation_type == ModelSegmentationType.UNET):
+      return "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/seg_chk.keras"  #LINUX
+      #return "C:\\Phee\\Class\\Capstone\\seg_chk.keras"                                     #WIN
+    else:
+      return "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/seg_deeplab_chk.keras"  #LINUX
+      #return "C:\\Phee\\Class\\Capstone\\seg_chk.keras"                                     #WIN
 
   #Set the filepath (for saving and loading)
   yolo_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/TestYOLO/model.keras"        #LINUX
-  unet_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/unet.keras"  #LINUX
+  #yolo_model_path = "C:\\Phee\\Class\\Capstone\\model.keras"     
 
-  #yolo_model_path = "C:\\Phee\\Class\\Capstone\\model.keras"                                    #WIN
-  #unet_model_path = "C:\\Phee\\Class\\Capstone\\unet.keras"                                     #WIN
+  if(segmentation_type == ModelSegmentationType.UNET):
+    unet_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/unet.keras"  #LINUX
+    #unet_model_path = "C:\\Phee\\Class\\Capstone\\unet.keras"       
+  else:
+    unet_model_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/models/deeplab.keras"  #LINUX
+    #unet_model_path = "C:\\Phee\\Class\\Capstone\\deeplab.keras"   
+
+                                 #WIN
+                                #WIN
 
   #Get correct image paths...
   if(yolo_training_source == YOLOTrainingSource.PrefabMasks or yolo_training_source == YOLOTrainingSource.OriginalImages):
     yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"   #LINUX
     #yolo_img_path ="C:\\Phee\\Class\\Capstone\\img\\yolo\\"                              #WIN
   else:
-    yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/output_masks/" #LINUX
+    if(segmentation_type == ModelSegmentationType.UNET):
+      yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/output_masks/" #LINUX
+    else:
+      yolo_img_path ="/home/chrissy/Documents/School/CS547/AIStuff/capstone/deeplab_output_masks/" 
     #yolo_img_path = "C:\\Phee\\Class\\Capstone\\img\\yolo\\"                              #WIN
   seg_img_path = "/home/chrissy/Documents/School/CS547/AIStuff/capstone/seg_images/"     #LINUX
   #seg_img_path = "C:\\Phee\\Class\\Capstone\\img\\seg\\"                                  #WIN
@@ -2885,10 +3277,10 @@ def get_path(path_type, model_type, yolo_training_source = YOLOTrainingSource.Or
 
 
 #Given a model type and directory path, get all files in that directory
-def get_dir_data(model_type, dir_path):
+def get_dir_data(model_type, dir_path, force_ordered):
   
   #Only sort if generating unet images
-  if(model_type == ModelType.UNET):
+  if(model_type == ModelType.SEGMENTATION or force_ordered == True):
     dirdata = sorted(os.listdir(dir_path))
   else:
     dirdata = os.listdir(dir_path)
@@ -2899,12 +3291,14 @@ def get_dir_data(model_type, dir_path):
 #Prepares data to be processed for the given model type...
 #model_type - The data type to prepare the data for
 #yolo_training_source - If yolo, the data source to train off of. Ignored if unet
+#Force images to be in order by name
+#segmentation_type - Type of segmentation model to run if data being prepared is for segmentation
 #returns - The prepared data of image paths,classes per image path, and bounding boxes per path  if yolo, or, image path and mask path for unet
-def prepare_data(model_type, yolo_training_source=YOLOTrainingSource.OriginalImages):
+def prepare_data(model_type, yolo_training_source=YOLOTrainingSource.OriginalImages, force_ordered = True, segmentation_type=ModelSegmentationType.UNET):
 
   #Load the paths for masks and rgb training images
-  mask_full_paths = get_image_file_paths(model_type, ImageDataType.MASKS)
-  img_full_paths = get_image_file_paths(model_type, ImageDataType.RGB)
+  mask_full_paths = get_image_file_paths(model_type, ImageDataType.MASKS, force_ordered, segmentation_type)
+  img_full_paths = get_image_file_paths(model_type, ImageDataType.RGB, force_ordered, segmentation_type)
 
   #Get dataset to use based on the current model type YOLO, U-NET, etc.
   if(model_type == ModelType.YOLO or model_type == ModelType.YOLO_SEG):
@@ -2922,13 +3316,15 @@ def prepare_data(model_type, yolo_training_source=YOLOTrainingSource.OriginalIma
 #model_type - The current model type
 #dir_path - The directory path to load images from
 #image_data_type - The image data type being loaded (e.g. rgb, masks)
-def get_image_file_paths(model_type, image_data_type):
+#force_ordered - If true, images will be forced to be in order
+#segmentation_type - The type of segmentation used
+def get_image_file_paths(model_type, image_data_type, force_ordered, segmentation_type):
 
   #The path to current images to load
-  dir_path = get_path(PathType.IMAGES, model_type)
+  dir_path = get_path(PathType.IMAGES, model_type, YOLOTrainingSource.OriginalImages, segmentation_type)
 
   #Get  directory data
-  dirdata = get_dir_data(model_type, dir_path)
+  dirdata = get_dir_data(model_type, dir_path, force_ordered)
 
   final_paths = []
 
@@ -2982,8 +3378,8 @@ def start(model_type):
       return None
 
   #Load the paths for masks and rgb training images
-  mask_full_paths = get_image_file_paths(model_type, ImageDataType.MASKS)
-  img_full_paths = get_image_file_paths(model_type, ImageDataType.RGB)
+  mask_full_paths = get_image_file_paths(model_type, ImageDataType.MASKS, True, SEGMENTATION_TYPE)
+  img_full_paths = get_image_file_paths(model_type, ImageDataType.RGB, True, SEGMENTATION_TYPE)
 
   #Show full image count and full mask count...
   all_img_count = len(img_full_paths)
@@ -2992,8 +3388,8 @@ def start(model_type):
   write_log(-1, "Total Masks = " + str(all_mask_count))
 
   if(model_type == ModelType.YOLO_SEG):
-    yolo_data = prepare_data(ModelType.YOLO)
-    seg_data = prepare_data(ModelType.UNET)
+    yolo_data = prepare_data(ModelType.YOLO, YOLOTrainingSource.OriginalImages, True)
+    seg_data = prepare_data(ModelType.SEGMENTATION, YOLOTrainingSource.OriginalImages, True, SEGMENTATION_TYPE)
 
     #NOT NEEDED (I BELIVE - LEAVING FOR NOW)
     #Get yolo training and validation data
@@ -3006,7 +3402,7 @@ def start(model_type):
 
     
   else:
-    data = prepare_data(model_type)
+    data = prepare_data(model_type, segmentation_type=SEGMENTATION_TYPE)
 
     #Fetch training, validation, and testing data
     train_ds = fetch_data(model_type, data, CycleType.TRAINING, all_img_count)
@@ -3029,7 +3425,7 @@ def start(model_type):
     if(model_type == ModelType.YOLO):
       yolo_train_model(train_ds, val_ds)     
     else:
-      seg_train_model(train_ds, val_ds)
+      seg_train_model(SEGMENTATION_TYPE, train_ds, val_ds)
 
   else:
 
@@ -3038,28 +3434,28 @@ def start(model_type):
 
       #Get index-locked predictions for both yolo and unet data sets
       write_log(-1, "Getting predictions on datasets...")
-      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data)
+      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data, segmentation_type=SEGMENTATION_TYPE)
 
 
     else:
   
       #Run evaluation loop for single model type - mostly for developing both models for YOLO seg
-      do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False)
+      do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, segmentation_type=SEGMENTATION_TYPE)
 
       #If outputting full test and validation image set for u-net, do that as well
       if(OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION):
-        if(model_type == ModelType.UNET):
+        if(model_type == ModelType.SEGMENTATION):
 
           #This part runs when we're generating masks to save to file. Not used because the results were worse...
           print("Also Generating Training and Validation Masks for UNet... to Send to YOLO")
 
           #val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
           #val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE)
 
           #train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
           #train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE)
 
       
 
