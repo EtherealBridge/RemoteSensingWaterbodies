@@ -1,0 +1,67 @@
+Total YOLO_SEG accuracy = 0.8621198228672674
+Total YOLO_SEG recall = 0.7883138671662647
+Total YOLO_SEG precision = 0.8621198228672674
+Total YOLO_SEG f1 score = 0.8235665760208551
+Total Nothing Pixels = 27271243
+Total YOLO_SEG Nothing accuracy = 0.9605938619818569
+Total YOLO_SEG Nothing recall = 0.978829268975284
+Total YOLO_SEG Nothing precision = 0.9742727373274319
+Total YOLO_SEG Nothing f1 score = 0.9765456880217357
+Total Lake Pixels = 520299
+Total YOLO_SEG Lake accuracy = 0.9936432641399794
+Total YOLO_SEG Lake recall = 0.6618942479649889
+Total YOLO_SEG Lake precision = 0.891328852452597
+Total YOLO_SEG Lake f1 score = 0.7596660651325561
+Total River Pixels = 5233168
+Total YOLO_SEG River accuracy = 0.9634608749515754
+Total YOLO_SEG River recall = 0.8754367602525984
+Total YOLO_SEG River precision = 0.8755123867860243
+Total YOLO_SEG River f1 score = 0.8754745718860907
+Overall class_accuracy_ [IoU=0.5)] = 0.7195767195767195
+Overall box_accuracy_[IoU=0.5)] = 0.7883597883597884
+Overall class_accuracy_ [IoU=0.95)] = 0.7195767195767195
+Overall box_accuracy_[IoU=0.95)] = 0.4497354497354497
+Overall class_precision_ [IoU=0.5)] = 0.7195767195767195
+Overall box_precision_[IoU=0.5)] = 0.7883597883597884
+Overall class_precision_ [IoU=0.95)] = 0.7195767195767195
+Overall box_precision_[IoU=0.95)] = 0.4497354497354497
+Overall class_recall [IoU=0.5)] = 0.5093632958801498
+Overall box_recall[IoU=0.5)] = 0.5580524344569289
+Overall class_recall [IoU=0.95)] = 0.5093632958801498
+Overall box_recall[IoU=0.95)] = 0.31835205992509363
+Overall class_f1_ [IoU=0.5)] = 0.5964912280701755
+Overall box_dice_[IoU=0.5)] = 0.6535087719298246
+Overall class_f1_ [IoU=0.95)] = 0.5964912280701755
+Overall box_dice_[IoU=0.95)] = 0.37280701754385964
+Class [Lake]class_accuracy_ [IoU=0.5)] = 0.7195767195767195
+Class [Lake]box_accuracy_[IoU=0.5)] = 0.7883597883597884
+Class [Lake]class_accuracy_ [IoU=0.95)] = 0.7195767195767195
+Class [Lake]box_accuracy_[IoU=0.95)] = 0.4497354497354497
+Class [Lake]class_precision_ [IoU=0.5)] = 0.7195767195767195
+Class [Lake]box_precision_[IoU=0.5)] = 0.7883597883597884
+Class [Lake]class_precision_ [IoU=0.95)] = 0.7195767195767195
+Class [Lake]box_precision_[IoU=0.95)] = 0.4497354497354497
+Class [Lake]class_recall [IoU=0.5)] = 0.5093632958801498
+Class [Lake]box_recall[IoU=0.5)] = 0.5580524344569289
+Class [Lake]class_recall [IoU=0.95)] = 0.5093632958801498
+Class [Lake]box_recall[IoU=0.95)] = 0.31835205992509363
+Class [Lake]class_f1_ [IoU=0.5)] = 0.5964912280701755
+Class [Lake]box_dice_[IoU=0.5)] = 0.6535087719298246
+Class [Lake]class_f1_ [IoU=0.95)] = 0.5964912280701755
+Class [Lake]box_dice_[IoU=0.95)] = 0.37280701754385964
+Class [River]class_accuracy_ [IoU=0.5)] = 0.7195767195767195
+Class [River]box_accuracy_[IoU=0.5)] = 0.7883597883597884
+Class [River]class_accuracy_ [IoU=0.95)] = 0.7195767195767195
+Class [River]box_accuracy_[IoU=0.95)] = 0.4497354497354497
+Class [River]class_precision_ [IoU=0.5)] = 0.7195767195767195
+Class [River]box_precision_[IoU=0.5)] = 0.7883597883597884
+Class [River]class_precision_ [IoU=0.95)] = 0.7195767195767195
+Class [River]box_precision_[IoU=0.95)] = 0.4497354497354497
+Class [River]class_recall [IoU=0.5)] = 0.5093632958801498
+Class [River]box_recall[IoU=0.5)] = 0.5580524344569289
+Class [River]class_recall [IoU=0.95)] = 0.5093632958801498
+Class [River]box_recall[IoU=0.95)] = 0.31835205992509363
+Class [River]class_f1_ [IoU=0.5)] = 0.5964912280701755
+Class [River]box_dice_[IoU=0.5)] = 0.6535087719298246
+Class [River]class_f1_ [IoU=0.95)] = 0.5964912280701755
+Class [River]box_dice_[IoU=0.95)] = 0.37280701754385964

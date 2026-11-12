@@ -7,6 +7,11 @@ from zoneinfo import ZoneInfo
 
 #For functions like sqrt
 import math
+
+#For getting bounding box data from segments
+import cv2
+
+import copy
         
 
 #Report on if script is training with GPU or not
@@ -157,6 +162,11 @@ class Direction(Enum):
   South = 2,
   West = 3
 
+#How are bounding boxes for segments in prediction data calculated?
+class BoundingBoxExtentsDetermination(Enum):
+  MaskAsNavMesh = 0             #Does a per-pixel determination, with bounding-box inflation or deflation
+  BoundingBoxFromIslands = 1    #Derives the bounding box from the mask islands
+
 
 #Represents which part of the box we'll try to have pixels snap to when classifying them - 
 #   the center of a bounding box (good if point is inside the bounding box)
@@ -194,6 +204,10 @@ SEGMENTATION_TYPE = ModelSegmentationType.DEEPLABV3PLUS
 #MODEL_SIZE = ModelSize.Small
 MODEL_SIZE = ModelSize.Medium
 #MODEL_SIZE = ModelSize.Large
+
+#How to determine the bounding box for segments from the DeepLabv3 or unet predicted mask?
+#BOUNDING_BOX_EXTENTS_DETERMINATION = BoundingBoxExtentsDetermination.MaskAsNavMesh           #Uses probes gliding on the navmesh to inflate / deflate the bb. Suboptimal.
+BOUNDING_BOX_EXTENTS_DETERMINATION = BoundingBoxExtentsDetermination.BoundingBoxFromIslands   #Uses CV2 to get island bounding box size - much more performant and accurate.
 
 #If true, saves segmentation image predictions to file. If false, skips this step, assuming this had already been done previously, as a shortcut.
 #Saving images takes time, but, the output of seg images isn't necessarily deterministic (that I know of), so, this would be True for anything but code debugging (where we want to save time)
@@ -259,6 +273,13 @@ BOUNDING_BOX_FORMAT = "xyxy"
 BOX_COLOR_TRUE = (0,200,0)
 BOX_COLOR_ORIGINAL_BOX = (255,0,0)
 BOX_COLOR_NEW_BOX = (255,255,0)
+
+#The absolute minimum size a dimension bounding box can be in pixels. Anything below will be ignored.
+#Used for calculating bounding boxes from masks
+BOUNDING_BOX_MIN_SIZE = 4
+
+#If a bounding box's iou is > than this value, will match bounding box (unet to yolo)
+MATCHED_BOUNDING_BOX_THRESHOLD = 0.5
 
 
 #The optimizer selection for this YOLO instance
@@ -332,6 +353,7 @@ class BoundingBox():
   y1 = 0
   classification = 0
 
+  #Filled with values
   def __init__(self, imgIndex, classification, x0,y0, x1,y1):
       self.imgIndex = imgIndex
       self.classification = classification
@@ -492,6 +514,24 @@ class BoundingBox():
     edge_dist_this = self.edgeDistanceTo(x,y)
     edge_dist_other = other_bounding_box.edgeDistanceTo(x,y)
     return edge_dist_this < edge_dist_other
+
+  #Gets the IoU from this bounding box to another bounding box
+  #bounding_box - The other bounding box as a BoundingBox() object
+  #returns - The IoU of the given bounding_box and this bounding box
+  def get_iou(self, bounding_box):
+
+    #Rank 1,4 subject array, because the keras function needs an array and you can't pass a single array in.
+    subject_bb = bounding_box
+
+    #Pass in this bounding box also as rank 1,4
+    this_tensor = np.array([self.toTensor()], dtype=np.float32)
+    this_bb = np.array([subject_bb.toTensor()], dtype=np.float32)
+
+    #@The calculated iou from the given boxes
+    calculated_iou = keras_cv.bounding_box.compute_iou(this_tensor, this_bb, BOUNDING_BOX_FORMAT)
+
+    #Convert the iou from a tensor to a float
+    return float(calculated_iou[0,0])
 
 
 #Represents a probe that can traverse through a unet mesh
@@ -1292,33 +1332,6 @@ def determine_yoloseg_class(img_classes, img_boxes, img_index, x, y, unet_y_pred
   return -1
 
       
-
-
-
-#Returns whether or not the object detection for the given pixel is correct 
-#img_pred_classes - The predicted classes (for the bounding boxes) for this image
-#img_pred_boxes - The predicted bounding boxes for this image
-#img_actual_classes - The actua; classes (for the bounding boxes) for this image
-#img_actual_boxes - The actual bounding boxes for this image
-#img_index - The image index for the image being tested
-#x - The x position of the pixel
-#y - The y position of the pixel
-#unet_y_pred - The unet-created nav mesh
-#returns - If the given pixel has a correct object detection
-def is_correct_object_detection(img_pred_classes, img_pred_boxes, img_actual_class, img_index, x, y, unet_y_pred):
-
-  #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
-  predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, img_index, x, y, unet_y_pred)
-
-  #Conversion - Lake in terms of unet vs. index for YOLO
-  if(predicted_yolo_seg_class == 0):
-     predicted_yolo_seg_class = 1
-    
-  if(predicted_yolo_seg_class == img_actual_class):
-    return True
-  else:
-    return False
-
   
 
 #Get the given metric for the combined models (Yolo-Seg)
@@ -1357,6 +1370,34 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   true_negatives = 0
   false_negatives = 0
 
+  #class metrics - lakes and rivers
+  nothing_true_positives = 0
+  lake_true_positives = 0
+  river_true_positives = 0
+  nothing_false_positives = 0
+  lake_false_positives = 0
+  river_false_positives = 0
+  nothing_true_negatives = 0
+  lake_true_negatives = 0
+  river_true_negatives = 0
+  nothing_false_negatives = 0
+  lake_false_negatives = 0
+  river_false_negatives = 0
+
+  #Total pixel count for lake and river
+  lake_pixels = 0
+  river_pixels = 0
+  nothing_pixels = 0
+
+  #Total prediction and actual counts for lakes and rivers
+  predicted_lake_pixels = 0
+  predicted_river_pixels = 0
+  predicted_nothing_pixels = 0
+
+  actual_lake_pixels = 0
+  actual_river_pixels = 0
+  actual_nothing_pixels = 0
+
   #overall metrics - still mostly segmentation
   total_pixels = (img_count * shape_x * shape_y)
   total_true_water_pixels = 0
@@ -1371,9 +1412,6 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   #Of the pixels predicted (and not necessarily right) how many of them have the correct class?
   yolo_seg_predictions_correct = 0
 
-  #The number of object detections only (only runs on predicted water pixels)
-  yolo_seg_total_object_detections = 0
-
   #For each image in the image list
   for img_index in range(0, img_count):
 
@@ -1383,27 +1421,26 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
     img_pred_classes = yolo_y_pred_classes_np[img_index]
     img_pred_boxes = yolo_y_pred_boxes_np[img_index]
 
-    #Add to number of object detections
-    yolo_seg_total_object_detections += len(img_pred_boxes)
+    #For each y (vertical) pixel
+    for y in range(0, shape_y):
 
-    #Gets the actual classes and boxes for this image
-    img_actual_classes = yolo_y_actual_classes_np[img_index]
-    img_actual_boxes = yolo_y_actual_boxes_np[img_index]  
-
-    #For each x (horizontal) pixel
-    for x in range(0, shape_x):
-
-      #For each y (vertical) pixel
-      for y in range(0, shape_y):
+      #For each x (horizontal) pixel
+      for x in range(0, shape_x):
 
         #Get the actual pixel in this position. is it water?
-        act_pixel = unet_y_act_np[img_index,x,y]
+        act_pixel = unet_y_act_np[img_index,y,x]
         if(act_pixel == 2):
           act_pixel = 3       #UNet is using lake-river while the yolo model had 5 classes
         is_actual_water = (act_pixel > 0)
 
+        #Is this pixel a lake? Is it a river?
+        is_actual_lake = (act_pixel == 1)
+        is_actual_river = (act_pixel == 3)
+        is_actual_nothing = (act_pixel == 0)
+
+
         #Get the predicted pixel and actual pixel at this point (x,y) for an image...
-        pred_pixel = unet_y_pred_np[img_index,x,y]
+        pred_pixel = unet_y_pred_np[img_index,y,x]
         is_pred_water = (pred_pixel > 0)
 
         #If is true water or predicted water, then increment counter
@@ -1429,35 +1466,216 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
           else:
             true_negatives += 1
 
-        #If water is predicted at all, then, run object detection on the water to get the class for it
+
+        #Calculate (not an AI function) the class of the predicted pixel vs. what its actual class should be
         if(is_pred_water):
+          predicted_yolo_seg_class = determine_yoloseg_class(img_pred_classes, img_pred_boxes, img_index, x, y, unet_y_pred)
+        else:
+          #Water is not predicted here...
+          predicted_yolo_seg_class = -1
 
-            #If the object detection class is correct here, then, add to the total items that are correct for both unet AND yolo
-            if(is_correct_object_detection(img_pred_classes, img_pred_boxes, act_pixel, img_index, x, y, unet_y_pred_np)):
-              yolo_seg_predictions_correct += 1
+        #Conversion - Lake in terms of unet vs. index for YOLO
+        if(predicted_yolo_seg_class == 0):
+          predicted_yolo_seg_class = 1
 
-              #If this is a true positive, then increment to total yolo correct as well.
-              if(is_actual_water):
-                yolo_seg_pixels_correct += 1
+        #Convert empty space to empty background class. Empty class in unet/deeplab is 0, but, is still a class...
+        if(predicted_yolo_seg_class == -1):
+          predicted_yolo_seg_class = 0
+
+        #Is this a predicted lake? A predicted river?
+        is_pred_lake = (predicted_yolo_seg_class == 1)
+        is_pred_river = (predicted_yolo_seg_class == 3)
+        is_pred_nothing = (predicted_yolo_seg_class == 0)
+
+        #Is this a correct pixel class prediction?
+        if(predicted_yolo_seg_class == act_pixel):
+          yolo_seg_predictions_correct += 1
+
+
+        if(is_pred_nothing or is_actual_nothing):
+          nothing_pixels += 1
+
+        if(is_pred_nothing):
+          predicted_nothing_pixels += 1
+
+        if(is_actual_nothing):
+          actual_nothing_pixels += 1
+
+        if(is_pred_nothing and is_actual_nothing):
+          nothing_true_positives += 1
+        if(not is_pred_nothing and is_actual_nothing):
+          nothing_false_negatives += 1
+        if(is_pred_nothing and not is_actual_nothing):
+          nothing_false_positives += 1
+        if(not is_pred_nothing and not is_actual_nothing):
+          nothing_true_negatives += 1
+
+
+        #Get class-level metrics
+        #Is this is an actual lake class or predicted lake class?
+        if(is_pred_lake or is_actual_lake):
+          lake_pixels += 1
+
+        if(is_pred_lake):
+          predicted_lake_pixels += 1
+
+        if(is_actual_lake):
+          actual_lake_pixels += 1
+
+        if(is_pred_lake and is_actual_lake):
+          lake_true_positives += 1
+        if(not is_pred_lake and is_actual_lake):
+          lake_false_negatives += 1
+        if(is_pred_lake and not is_actual_lake):
+          lake_false_positives += 1
+        if(not is_pred_lake and not is_actual_lake):
+          lake_true_negatives += 1
+          
+
+        #Is this is an actual river class or predicted river class?
+        if(is_pred_river or is_actual_river):
+          river_pixels += 1
+
+        if(is_pred_river):
+          predicted_river_pixels += 1
+
+        if(is_actual_river):
+          actual_river_pixels += 1
+
+        if(is_pred_river and is_actual_river):
+          river_true_positives += 1
+        if(not is_pred_river and is_actual_river):
+          river_false_negatives += 1
+        if(is_pred_river and not is_actual_river):
+          river_false_positives += 1
+        if(not is_pred_river and not is_actual_river):
+          river_true_negatives += 1
+
+        #If this is a true positive, then increment to total yolo correct as well.
+        if(is_pred_water and is_actual_water and predicted_yolo_seg_class == act_pixel):
+          yolo_seg_pixels_correct += 1
+
 
     #Calculate YOLOSEG true accuracy
-    yolo_seg_accuracy = yolo_seg_pixels_correct / total_pred_water_pixels
+    if(total_pred_water_pixels > 0):
+      yolo_seg_accuracy = yolo_seg_pixels_correct / total_pred_water_pixels
+    else:
+      yolo_seg_accuracy = 0.0
 
     #Recall equals true positives over all positives
-    yolo_seg_recall = true_positives / total_pred_or_true_water_pixels
+    if(total_pred_or_true_water_pixels > 0.0):
+      yolo_seg_recall = true_positives / total_pred_or_true_water_pixels
+    else:
+      yolo_seg_recall = 0.0
 
     #Precision equals correct_true_positives (yolo_seg_pixels_correct) over all positives (total_pred_water_pixels)
-    yolo_seg_precision = yolo_seg_pixels_correct / total_pred_water_pixels
+    if(total_pred_water_pixels > 0.0):
+      yolo_seg_precision = yolo_seg_pixels_correct / total_pred_water_pixels
+    else:
+      yolo_seg_precision = 0.0
 
     #P1 score is 
-    yolo_seg_f1_score = 2 * ((yolo_seg_precision * yolo_seg_recall) / (yolo_seg_precision + yolo_seg_recall))
+    if((yolo_seg_precision + yolo_seg_recall) > 0.0):
+      yolo_seg_f1_score = 2 * ((yolo_seg_precision * yolo_seg_recall) / (yolo_seg_precision + yolo_seg_recall))
+    else:
+      yolo_seg_f1_score = 0.0
+
+
+    #Metrics per class
+
+
+    TotalAll = (nothing_true_positives + nothing_true_negatives + nothing_false_positives + nothing_false_negatives)
+    if(TotalAll > 0.0):
+      yolo_seg_nothing_accuracy = (nothing_true_positives + nothing_true_negatives) / TotalAll
+    else:
+      yolo_seg_nothing_accuracy = 0.0
+    TPFN = (nothing_true_positives + nothing_false_negatives)
+    if(TPFN > 0.0):
+      yolo_seg_nothing_recall = (nothing_true_positives / TPFN)
+    else:
+      yolo_seg_nothing_recall = 0.0
+    TPFP = (nothing_true_positives + nothing_false_positives)
+    if(TPFP > 0.0):
+      yolo_seg_nothing_precision = (nothing_true_positives / TPFP)
+    else:
+      yolo_seg_nothing_precision = 0.0
+    PR = (yolo_seg_nothing_precision + yolo_seg_nothing_recall)
+    if(PR > 0.0):
+      yolo_seg_nothing_f1_score = (2 * ((yolo_seg_nothing_precision * yolo_seg_nothing_recall) / PR))
+    else:
+      yolo_seg_nothing_f1_score = 0.0
+
+
+
+    TotalAll = (lake_true_positives + lake_true_negatives + lake_false_positives + lake_false_negatives)
+    if(TotalAll > 0.0):
+      yolo_seg_lake_accuracy = (lake_true_positives + lake_true_negatives) / TotalAll
+    else:
+      yolo_seg_lake_accuracy = 0.0
+    TPFN = (lake_true_positives + lake_false_negatives)
+    if(TPFN > 0.0):
+      yolo_seg_lake_recall = (lake_true_positives / TPFN)
+    else:
+      yolo_seg_lake_recall = 0.0
+    TPFP = (lake_true_positives + lake_false_positives)
+    if(TPFP > 0.0):
+      yolo_seg_lake_precision = (lake_true_positives / TPFP)
+    else:
+      yolo_seg_lake_precision = 0.0
+    PR = (yolo_seg_lake_precision + yolo_seg_lake_recall)
+    if(PR > 0.0):
+      yolo_seg_lake_f1_score = (2 * ((yolo_seg_lake_precision * yolo_seg_lake_recall) / PR))
+    else:
+      yolo_seg_lake_f1_score = 0.0
+
+      
+
+    TotalAll = (river_true_positives + river_true_negatives + river_false_positives + river_false_negatives)
+    if(TotalAll > 0.0):
+      yolo_seg_river_accuracy = (river_true_positives + river_true_negatives) / TotalAll
+    else:
+      yolo_seg_river_accuracy = 0.0
+    TPFN = (river_true_positives + river_false_negatives)
+    if(TPFN > 0.0):
+      yolo_seg_river_recall = (river_true_positives / TPFN)
+    else:
+      yolo_seg_river_recall = 0.0
+    TPFP = (river_true_positives + river_false_positives)
+    if(TPFP > 0.0):
+      yolo_seg_river_precision = (river_true_positives / TPFP)
+    else:
+      yolo_seg_river_precision = 0.0
+    PR = (yolo_seg_river_precision + yolo_seg_river_recall)
+    if(PR > 0.0):
+      yolo_seg_river_f1_score = (2 * ((yolo_seg_river_precision * yolo_seg_river_recall) / PR))
+    else:
+      yolo_seg_river_f1_score = 0.0
 
     #Output the yolo seg accuracy
     write_log(-1, "End of image " + str(img_index) + " calculations... ")
-    write_log(-1, "CURRENT YOLO_SEG accuracy = " + str(yolo_seg_accuracy))
-    write_log(-1, "CURRENT YOLO_SEG recall = " + str(yolo_seg_recall))
-    write_log(-1, "CURRENT YOLO_SEG precision = " + str(yolo_seg_precision))
-    write_log(-1, "CURRENT YOLO_SEG f1 score = " + str(yolo_seg_f1_score))
+    write_log(-1, "CURRENT YOLO_SEG Water accuracy = " + str(yolo_seg_accuracy))
+    write_log(-1, "CURRENT YOLO_SEG Water  recall = " + str(yolo_seg_recall))
+    write_log(-1, "CURRENT YOLO_SEG Water  precision = " + str(yolo_seg_precision))
+    write_log(-1, "CURRENT YOLO_SEG Water  f1 score = " + str(yolo_seg_f1_score))
+
+    write_log(-1, "CURRENT Nothing Pixels = " + str(nothing_pixels))
+    write_log(-1, "CURRENT YOLO_SEG Nothing accuracy = " + str(yolo_seg_nothing_accuracy))
+    write_log(-1, "CURRENT YOLO_SEG Nothing recall = " + str(yolo_seg_nothing_recall))
+    write_log(-1, "CURRENT YOLO_SEG Nothing precision = " + str(yolo_seg_nothing_precision))
+    write_log(-1, "CURRENT YOLO_SEG Nothing f1 score = " + str(yolo_seg_nothing_f1_score))
+
+    write_log(-1, "CURRENT Lake Pixels = " + str(lake_pixels))
+    write_log(-1, "CURRENT YOLO_SEG Lake accuracy = " + str(yolo_seg_lake_accuracy))
+    write_log(-1, "CURRENT YOLO_SEG Lake recall = " + str(yolo_seg_lake_recall))
+    write_log(-1, "CURRENT YOLO_SEG Lake precision = " + str(yolo_seg_lake_precision))
+    write_log(-1, "CURRENT YOLO_SEG Lake f1 score = " + str(yolo_seg_lake_f1_score))
+
+    write_log(-1, "CURRENT River Pixels = " + str(river_pixels))
+    write_log(-1, "CURRENT YOLO_SEG River accuracy = " + str(yolo_seg_river_accuracy))
+    write_log(-1, "CURRENT YOLO_SEG River recall = " + str(yolo_seg_river_recall))
+    write_log(-1, "CURRENT YOLO_SEG River precision = " + str(yolo_seg_river_precision))
+    write_log(-1, "CURRENT YOLO_SEG River f1 score = " + str(yolo_seg_river_f1_score))
+
     write_log(-1, "Images done: " + str(img_index))
 
   #Output the yolo seg accuracy
@@ -1465,6 +1683,27 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   write_log(-1, "Total YOLO_SEG recall = " + str(yolo_seg_recall))
   write_log(-1, "Total YOLO_SEG precision = " + str(yolo_seg_precision))
   write_log(-1, "Total YOLO_SEG f1 score = " + str(yolo_seg_f1_score))
+
+  write_log(-1, "Total Nothing Pixels = " + str(nothing_pixels))
+  write_log(-1, "Total YOLO_SEG Nothing accuracy = " + str(yolo_seg_nothing_accuracy))
+  write_log(-1, "Total YOLO_SEG Nothing recall = " + str(yolo_seg_nothing_recall))
+  write_log(-1, "Total YOLO_SEG Nothing precision = " + str(yolo_seg_nothing_precision))
+  write_log(-1, "Total YOLO_SEG Nothing f1 score = " + str(yolo_seg_nothing_f1_score))
+
+  
+  write_log(-1, "Total Lake Pixels = " + str(lake_pixels))
+  write_log(-1, "Total YOLO_SEG Lake accuracy = " + str(yolo_seg_lake_accuracy))
+  write_log(-1, "Total YOLO_SEG Lake recall = " + str(yolo_seg_lake_recall))
+  write_log(-1, "Total YOLO_SEG Lake precision = " + str(yolo_seg_lake_precision))
+  write_log(-1, "Total YOLO_SEG Lake f1 score = " + str(yolo_seg_lake_f1_score))
+
+    
+  write_log(-1, "Total River Pixels = " + str(river_pixels))
+  write_log(-1, "Total YOLO_SEG River accuracy = " + str(yolo_seg_river_accuracy))
+  write_log(-1, "Total YOLO_SEG River recall = " + str(yolo_seg_river_recall))
+  write_log(-1, "Total YOLO_SEG River precision = " + str(yolo_seg_river_precision))
+  write_log(-1, "Total YOLO_SEG River f1 score = " + str(yolo_seg_river_f1_score))
+
   write_metric(-1, ModelType.SEGMENTATION, MetricType.YOLOSEGACCURACY, CycleType.TESTING, yolo_seg_accuracy)
             
           
@@ -1501,6 +1740,7 @@ def get_seg_metrics_class(y_pred, y_actual, specific_class, metric_type):
   incorrect_predictions = 0         #The number of incorrect predictions
   classified_as_positive = 0        #Everything classified classified as positive
   all_predictions = 0               #This could be calculated from array shape, but, number of predictions. Need to count it bc of specific class counting predictions.
+
 
   #For each image index...
   for instance_idx in range(0, instances):
@@ -2691,18 +2931,15 @@ def inflate_bounding_box(unet_nav_mesh, bounding_box : BoundingBox):
   #return the bounding box that may have been inflated or left untouched
   return bounding_box
 
-  
-
-  
 
 
-#Floods YOLO predictions using the unet masks as a navigation area for flooding probes. Expands YOLO box min/max to unet mask section min/max.
+#Derive updated YOLO bounding boxes with probes that glide along the predicted DeepLabv3 or unet mask like a nav mesh
 #yolo_predicted_values - The YOLO box predictions - Will have the same. Has in this order: Class predictions, Bounding Boxes, confidence(?)
 #unet_predicted_masks - The predicted pixels per image for unet masks
-def get_flooded_yolo_predictions(yolo_predicted_values, unet_predicted_masks):
+#returns - YOLO bounding boxes inflated or deflated by probes gliding on the unet or deeplabv3+ preidctions bounding boxes
+def get_flooded_yolo_predictions_with_probes(yolo_predicted_values, unet_predicted_masks):
 
   #Convert yolo predictions and unet predictions from Keras formatted jagged arrays to numpy multi-dimensional arrays. Easier to work with and faster...
-  yolo_predicted_values_np = keras.ops.convert_to_numpy(yolo_predicted_values)
   unet_predicted_masks_np = keras.ops.convert_to_numpy(unet_predicted_masks)
 
   #Get the dimensions and bounds of our process. 
@@ -2765,7 +3002,111 @@ def get_flooded_yolo_predictions(yolo_predicted_values, unet_predicted_masks):
 
   #Return the final, inflated bounding boxes
   return yolo_predicted_values
+
+
+#Given the collection of all bounding box images.
+#yolo_predicted_values - The YOLO predictions of classes, bounding boxes
+#returns - A numpy array of just the bounding boxes for the given image (byu its index)
+def get_predicted_bounding_boxes(yolo_predicted_values, img_index):
+  return keras.ops.convert_to_numpy(yolo_predicted_values["boxes"])[img_index]
+
+#Creates an image to analyze for islands from prediction masks. Will create multiple bounding boxes which will stick to a predicted bounding box.
+#yolo_predicted_values - The YOLO predictions as a Keras dictionary object. Index-locked to unet/deeplab predictions.
+#unet_predicted_masks - The UNET or Deeplabv3 predictions as a Keras dictionary object. Index-locked to yolo predictions.
+#returns - The updated bounding boxes matched to the bounding boxes calculated from deeplab or unet semantic segmentations
+def get_flooded_yolo_predictions_from_islands(yolo_predicted_values, unet_predicted_masks):
+
+  #Convert yolo predictions and unet predictions from Keras formatted jagged arrays to numpy multi-dimensional arrays. Easier to work with and faster...
+  unet_predicted_masks_np = keras.ops.convert_to_numpy(unet_predicted_masks)
+
+  #https://stackoverflow.com/questions/35854197/how-to-use-opencvs-connectedcomponentswithstats-in-python
+  image_count = unet_predicted_masks_np.shape[0]
+  y_shape = unet_predicted_masks_np.shape[1]
+  x_shape = unet_predicted_masks_np.shape[2]
+  for img_index in range(0,image_count):
+
+    # #https://stackoverflow.com/questions/4535374/initialize-a-numpy-array
+    # #Pixel values for the pillow image
+    # #Initialize the array with all zeros
+    # pixel_values = np.zeros((y_shape, x_shape, 1), dtype=np.uint8)
+
+    #Get the predicted bounding boxes for this image
+    img_pred_bounding_boxes = get_predicted_bounding_boxes(yolo_predicted_values, img_index)
+
+    #Use save_seg_img to save image?
+
+    pixel_values = unet_predicted_masks_np[img_index].astype(np.int8)
+    
+    #https://stackoverflow.com/questions/35854197/how-to-use-opencvs-connectedcomponentswithstats-in-python'
+    #Get bounding box from image data
+    connectivity = 4 # or whatever you prefer
+    bb_count, bounding_box_labels, bounding_box_stats, c = cv2.connectedComponentsWithStats(pixel_values, connectivity, cv2.CV_32S)
+
+    #For each predicted bounding box
+    #Ignore the initial bounding box. It's always [0,0,512,512] - probably just for the whole image or the background pixels...
+    for i in range(1, bb_count):
+
+      #From bounding box statistics - x0 coordinate, y0 coordinate (lower left corner), width, height. Also has area but that's ignored.
+      x0, y0, width, height,c = bounding_box_stats[i]
+
+      #Get x1 and y1 from width and height
+      x1 = x0 + width
+      y1 = y0 + height
+
+      #If a bounding box should be created here, then...
+      if(width >= BOUNDING_BOX_MIN_SIZE and height >= BOUNDING_BOX_MIN_SIZE):
+        unet_bounding_box = BoundingBox(img_index, -1, x0, y0, x1, y1)
+
+        #The winning IoU and Winning index - Set that yolo bounding box to this bounding box value
+        winning_index = -1
+        winning_iou = 0.0
+
+        #Loop through YOLO bounding boxes for this image
+        for a in range(0,len(img_pred_bounding_boxes)):
+
+          #For-+mat: [x0,y0,x1,y1]
+          pred_box = img_pred_bounding_boxes[a]
+
+          yolo_bounding_box = BoundingBox(img_index, -1,-1,-1,-1,-1)
+          yolo_bounding_box.setValsFromNPSlice(pred_box)
+
+          #If is a valid yolo bounding box (not padding)
+          if(yolo_bounding_box.isValid()):
+
+            #Get the bounding box that this bounding box matches best with and set the yolo bounding box to the unet/deeplab segmentation bounding box
+            iou = unet_bounding_box.get_iou(yolo_bounding_box)
+
+            #If better IoU then previous then...
+            if(iou > winning_iou and iou > MATCHED_BOUNDING_BOX_THRESHOLD):
+              winning_iou = iou
+              winning_index = a
+          else:
+
+            #No more bounding boxes to cycle through for this image
+            break
+
+        #If there was a winning bounding box, then set the winning yolo bounding box to the segmentation bounding box
+        if(winning_index > -1):
+          yolo_predicted_values["boxes"][img_index][winning_index] = unet_bounding_box.toTensor()
+
+  #Return updated yolo bounding boxes
+  return yolo_predicted_values 
+
+
+#Floods YOLO predictions using the unet masks as a navigation area for flooding probes. Expands YOLO box min/max to unet mask section min/max.
+#yolo_predicted_values - The YOLO box predictions - Will have the same. Has in this order: Class predictions, Bounding Boxes, confidence(?)
+#unet_predicted_masks - The predicted pixels per image for unet masks
+#bounding_box_extents_determination_type - Way of matching YOLO bounding box to the more accurate DeepLabV3+ or UNET segmentations
+#returns - The updated YOLO bounding boxes
+def get_flooded_yolo_predictions(yolo_predicted_values, unet_predicted_masks, bounding_box_extents_determination_type):
+
+  #Should we use navmesh probes for determining bounding box sizes or calculate the bounding box from islands?
+  if(bounding_box_extents_determination_type == BoundingBoxExtentsDetermination.MaskAsNavMesh):
+    return get_flooded_yolo_predictions_with_probes(yolo_predicted_values, unet_predicted_masks)
+  else:
+    return get_flooded_yolo_predictions_from_islands(yolo_predicted_values, unet_predicted_masks)
   
+   
 
 #Saves a segmentation image with accumulated pixels and the base image path
 #base_image_path - The base image path that will be used to save the segmentation image
@@ -2890,7 +3231,8 @@ def get_predicted_data(model_type, dataset, segmentation_type):
 #yolo_dataset - Optional - If using yolo seg, the YOLO dataset
 #set_dataset - Optional - If using yolo seg, the segmentation dataset
 #segmentation_type - Optional - The segmentation type being used for the segmentation model
-def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics, yolo_dataset = None, seg_dataset = None, segmentation_type = ModelSegmentationType.UNET):
+def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count, no_metrics, yolo_dataset = None, seg_dataset = None, segmentation_type = ModelSegmentationType.UNET, 
+               bounding_box_determination : BoundingBoxExtentsDetermination = BoundingBoxExtentsDetermination.MaskAsNavMesh):
 
 
   #YOLO-Seg gets predictions for both YOLO and UNet Segmentation. The other two run independently for testing each.
@@ -2994,7 +3336,12 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
       #   e.g. - A river will continuously flow, generally uninterrupted, and, a lake will be continuous as well.
       #   The purpose of probes gliding along the mask is to only inflate in one isolated water body - as soon as a probe hits something that is not water,
       #   it will stop.
-      yolo_y_pred = get_flooded_yolo_predictions(yolo_y_pred, unet_y_pred)
+      
+      #yolo_y_unflooded = copy.deepcopy(yolo_y_pred)
+      yolo_y_pred = get_flooded_yolo_predictions(yolo_y_pred, unet_y_pred, bounding_box_extents_determination_type=bounding_box_determination)
+
+      #TEST - Show old and new boxes
+      #visualize_testing_data(yolo_y_unflooded, yolo_y_pred, 9, 9, unet_images)
 
   else:
     #Get and display the number of images
@@ -3010,7 +3357,11 @@ def do_testing(model_type, data, cycle_type, bounding_box_format, all_img_count,
       #Test
       visualize_masks(unet_y_actual, unet_y_pred, 5, 5, unet_images)
 
+      #Output the YOLO seg metrics
       output_metrics_per_class(ModelType.YOLO_SEG, None, None, yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actual, segmentation_type)
+
+      #Output the YOLO metrics
+      output_metrics_per_class(ModelType.YOLO, yolo_y_pred, yolo_y_actual)
 
     #Model type is YOLO or unet for individual testing
     else:
@@ -3434,13 +3785,15 @@ def start(model_type):
 
       #Get index-locked predictions for both yolo and unet data sets
       write_log(-1, "Getting predictions on datasets...")
-      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data, segmentation_type=SEGMENTATION_TYPE)
+      do_testing(ModelType.YOLO_SEG, None, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, yolo_dataset=yolo_data, seg_dataset=seg_data, segmentation_type=SEGMENTATION_TYPE,
+                 bounding_box_determination=BOUNDING_BOX_EXTENTS_DETERMINATION)
 
 
     else:
   
       #Run evaluation loop for single model type - mostly for developing both models for YOLO seg
-      do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, segmentation_type=SEGMENTATION_TYPE)
+      do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, no_metrics=False, segmentation_type=SEGMENTATION_TYPE,
+                 bounding_box_determination=BOUNDING_BOX_EXTENTS_DETERMINATION)
 
       #If outputting full test and validation image set for u-net, do that as well
       if(OPTION_GENERATE_FULL_YOLOSEG_OUTPUTMASK_SELECTION):
@@ -3451,11 +3804,13 @@ def start(model_type):
 
           #val_data = get_dataset(data, CycleType.VALIDATION, all_img_count)
           #val_img_paths = get_paths_from_dataset(val_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE,
+                     bounding_box_determination=BOUNDING_BOX_EXTENTS_DETERMINATION)
 
           #train_data = get_dataset(data, CycleType.TRAINING, all_img_count)
           #train_img_paths = get_paths_from_dataset(train_data, model_type, ImageDataType.RGB)
-          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE)
+          do_testing(model_type, data, CycleType.TESTING, BOUNDING_BOX_FORMAT, all_img_count, True, segmentation_type=SEGMENTATION_TYPE,
+                     bounding_box_determination=BOUNDING_BOX_EXTENTS_DETERMINATION)
 
       
 
