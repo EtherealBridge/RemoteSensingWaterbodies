@@ -1345,8 +1345,15 @@ def determine_yoloseg_class(img_classes, img_boxes, img_index, x, y, unet_y_pred
   #No suitable bounding box found
   return -1
 
-      
-  
+#Translates old yolo river index to the new index
+def translate_river_classes(yolo_y):
+
+  for img_index in range(0, len(yolo_y)):
+    classes = yolo_y[img_index]
+    for class_index in range(0,len(classes)):
+        if(yolo_y[img_index][class_index] == 3):
+          yolo_y[img_index][class_index] = 1
+  return yolo_y
 
 #Get the given metric for the combined models (Yolo-Seg)
 #yolo_y_pred - The YOLO y predicted values
@@ -1360,12 +1367,16 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   #The predicted classes and boxes, where, each index is locked to the image index, and has an array of the classes and boxes, index-locked
   yolo_y_pred_classes = yolo_y_pred["classes"]
   yolo_y_pred_classes_np = keras.ops.convert_to_numpy(yolo_y_pred_classes)
+  yolo_y_pred_classes_np = translate_river_classes(yolo_y_pred_classes_np)
   yolo_y_pred_boxes = yolo_y_pred["boxes"]
   yolo_y_pred_boxes_np = keras.ops.convert_to_numpy(yolo_y_pred_boxes)
+
+
 
   #Get the actual classes and boxes, which are packed into an array per index
   yolo_y_actual_classes = yolo_y_actual["classes"]
   yolo_y_actual_classes_np = keras.ops.convert_to_numpy(yolo_y_actual_classes)
+  yolo_y_actual_classes_np = translate_river_classes(yolo_y_actual_classes_np)
   yolo_y_actual_boxes = yolo_y_actual["boxes"]
   yolo_y_actual_boxes_np = keras.ops.convert_to_numpy(yolo_y_actual_boxes)
 
@@ -1426,6 +1437,19 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
   #Of the pixels predicted (and not necessarily right) how many of them have the correct class?
   yolo_seg_predictions_correct = 0
 
+  #IOU metrics
+
+  #Added IOU values to be divided by the number of bounding boxes
+  total_iou = 0.0
+  total_lake_iou = 0.0
+  total_river_iou = 0.0
+
+  #Number of bounding boxes that are actual bounding boxes
+  actual_bounding_box_count = 0
+  actual_lake_bounding_box_count = 0
+  actual_river_bounding_box_count = 0
+
+
   #For each image in the image list
   for img_index in range(0, img_count):
 
@@ -1434,6 +1458,32 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
     #Gets the predicted classes and boxes for this image
     img_pred_classes = yolo_y_pred_classes_np[img_index]
     img_pred_boxes = yolo_y_pred_boxes_np[img_index]
+
+    #Get the actual bounding boxes for this image
+    img_actual_boxes = yolo_y_actual_boxes_np[img_index]
+    img_actual_classes = yolo_y_actual_classes_np[img_index]
+
+    #Calculate bounding box IOU between predicted and actual boxes.
+    #Calculate IoU for everything, lakes, and then rivers
+    all_iou = calculate_iou(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes)
+    total_iou += all_iou
+
+    lake_iou = calculate_iou(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, 0)
+    total_lake_iou += lake_iou
+
+    river_iou = calculate_iou(img_pred_classes, img_pred_boxes, img_actual_classes, img_actual_boxes, 1)
+    total_river_iou += river_iou
+
+    #Sample number of true bounding boxes. Add all valid true bounding boxes
+    for a in range(0, len(img_actual_boxes)):
+      curr_bounding_box : BoundingBox = BoundingBox(-1, img_actual_classes[a], -1, -1, -1, -1)
+      curr_bounding_box.setValsFromNPSlice(img_actual_boxes[a])
+      if(curr_bounding_box.isValid()):
+        actual_bounding_box_count += 1
+        if(curr_bounding_box.getClass() == 0):
+          actual_lake_bounding_box_count += 1
+        else:
+          actual_river_bounding_box_count += 1
 
     #For each y (vertical) pixel
     for y in range(0, shape_y):
@@ -1444,12 +1494,12 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
         #Get the actual pixel in this position. is it water?
         act_pixel = unet_y_act_np[img_index,y,x]
         if(act_pixel == 2):
-          act_pixel = 3       #UNet is using lake-river while the yolo model had 5 classes
+          act_pixel = 2       #Translate the unet river index to the yolo river
         is_actual_water = (act_pixel > 0)
 
         #Is this pixel a lake? Is it a river?
         is_actual_lake = (act_pixel == 1)
-        is_actual_river = (act_pixel == 3)
+        is_actual_river = (act_pixel == 2)
         is_actual_nothing = (act_pixel == 0)
 
 
@@ -1488,6 +1538,9 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
           #Water is not predicted here...
           predicted_yolo_seg_class = -1
 
+        if(predicted_yolo_seg_class == 1):
+          predicted_yolo_seg_class = 2
+
         #Conversion - Lake in terms of unet vs. index for YOLO
         if(predicted_yolo_seg_class == 0):
           predicted_yolo_seg_class = 1
@@ -1498,7 +1551,7 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
 
         #Is this a predicted lake? A predicted river?
         is_pred_lake = (predicted_yolo_seg_class == 1)
-        is_pred_river = (predicted_yolo_seg_class == 3)
+        is_pred_river = (predicted_yolo_seg_class == 2)
         is_pred_nothing = (predicted_yolo_seg_class == 0)
 
         #Is this a correct pixel class prediction?
@@ -1665,12 +1718,30 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
     else:
       yolo_seg_river_f1_score = 0.0
 
+
+    #Calculate average IoU - total IoU / counted bounding boxes
+    if(actual_bounding_box_count > 0):
+      avg_iou = total_iou / actual_bounding_box_count
+    else:
+      avg_iou = 0.0
+
+    if(actual_lake_bounding_box_count > 0):
+      avg_lake_iou = total_lake_iou / actual_lake_bounding_box_count
+    else:
+      avg_lake_iou = 0.0
+
+    if(actual_river_bounding_box_count > 0):
+      avg_river_iou = total_river_iou / actual_river_bounding_box_count
+    else:
+      avg_river_iou = 0.0
+
     #Output the yolo seg accuracy
     write_log(-1, "End of image " + str(img_index) + " calculations... ")
     write_log(-1, "CURRENT YOLO_SEG Water accuracy = " + str(yolo_seg_accuracy))
     write_log(-1, "CURRENT YOLO_SEG Water  recall = " + str(yolo_seg_recall))
     write_log(-1, "CURRENT YOLO_SEG Water  precision = " + str(yolo_seg_precision))
     write_log(-1, "CURRENT YOLO_SEG Water  f1 score = " + str(yolo_seg_f1_score))
+    write_log(-1, "CURRENT YOLO_SEG Water  Avg IoU = " + str(avg_iou))
 
     write_log(-1, "CURRENT Nothing Pixels = " + str(nothing_pixels))
     write_log(-1, "CURRENT YOLO_SEG Nothing accuracy = " + str(yolo_seg_nothing_accuracy))
@@ -1683,12 +1754,14 @@ def output_yolo_seg_metrics(yolo_y_pred, yolo_y_actual, unet_y_pred, unet_y_actu
     write_log(-1, "CURRENT YOLO_SEG Lake recall = " + str(yolo_seg_lake_recall))
     write_log(-1, "CURRENT YOLO_SEG Lake precision = " + str(yolo_seg_lake_precision))
     write_log(-1, "CURRENT YOLO_SEG Lake f1 score = " + str(yolo_seg_lake_f1_score))
+    write_log(-1, "CURRENT YOLO_SEG Lake Avg IoU = " + str(avg_lake_iou))
 
     write_log(-1, "CURRENT River Pixels = " + str(river_pixels))
     write_log(-1, "CURRENT YOLO_SEG River accuracy = " + str(yolo_seg_river_accuracy))
     write_log(-1, "CURRENT YOLO_SEG River recall = " + str(yolo_seg_river_recall))
     write_log(-1, "CURRENT YOLO_SEG River precision = " + str(yolo_seg_river_precision))
     write_log(-1, "CURRENT YOLO_SEG River f1 score = " + str(yolo_seg_river_f1_score))
+    write_log(-1, "CURRENT YOLO_SEG River Avg IoU = " + str(avg_river_iou))
 
     write_log(-1, "Images done: " + str(img_index))
 
@@ -2296,16 +2369,50 @@ def output_metrics_per_class(model_type, y_pred,y_actual, yolo_y_pred = None, yo
         
 
 #Given y_predicted values and y_actual values, calculate the IOU
-#y_pred - The predicted values
-#y_actual - The actual values
+#pred_classes - The predicted classes
+#pred_boxes - The predicted boxes
+#actual_classes - The actual classes
+#actual_boxes - The actual boxes
 #specific_class - If this is for a specific class, the class number. -1 = all classes
-def calculate_iou(y_pred, y_actual):
-  pred_classes = y_pred["classes"]
-  pred_boxes = y_pred["boxes"]
-  actual_classes = y_actual["classes"]
-  actual_boxes = y_actual["boxes"]
+def calculate_iou(pred_classes, pred_boxes, actual_classes, actual_boxes, specific_class = -1):
 
-  return keras_cv.bounding_box.compute_iou(pred_boxes, actual_boxes, BOUNDING_BOX_FORMAT)
+    temp_pred_boxes = []
+    temp_actual_boxes = []
+    for i in range(0, len(pred_boxes)):
+      curr_bounding_box : BoundingBox = BoundingBox(-1, pred_classes[i], -1, -1, -1, -1)
+      curr_bounding_box.setValsFromNPSlice(pred_boxes[i])
+      if(curr_bounding_box.isValid()):
+        if(specific_class != -1):
+          if(curr_bounding_box.getClass() == specific_class):
+            temp_pred_boxes.append(pred_boxes[i])
+        else:
+          temp_pred_boxes.append(pred_boxes[i])
+    for i in range(0, len(actual_boxes)):
+      curr_bounding_box : BoundingBox = BoundingBox(-1, actual_classes[i], -1, -1, -1, -1)
+      curr_bounding_box.setValsFromNPSlice(actual_boxes[i])
+      if(curr_bounding_box.isValid()):
+        if(specific_class != -1):
+          if(curr_bounding_box.getClass() == specific_class):
+            temp_actual_boxes.append(actual_boxes[i])
+        else:
+          temp_actual_boxes.append(actual_boxes[i])
+
+    if(len(temp_pred_boxes) == 0.0 or len(temp_actual_boxes) == 0.0):
+      return 0.0
+
+    #https://www.tensorflow.org/api_docs/python/tf/constant?version=stable
+    #Convert numpy arrays back to tensors so that we can use them with the compute_iou function
+    pred_boxes = tf.constant(temp_pred_boxes)
+    actual_boxes = tf.constant(temp_actual_boxes)
+
+    #https://www.tensorflow.org/api_docs/python/tf/math/reduce_mean - get mean from iou array
+    #https://www.tensorflow.org/api_docs/python/tf/math/reduce_max?version=stable - Get max from iou array
+    #https://www.datascienceweekly.org/tutorials/tensorflow-max-use-tf-reduce-max-to-get-max-value-of-a-tensorflow-tensor - Getting max from tensor example
+    bb_matrix = keras_cv.bounding_box.compute_iou(pred_boxes, actual_boxes, BOUNDING_BOX_FORMAT)
+    bb_max = tf.reduce_max(bb_matrix, axis=0)
+    bb_reduced_mean = tf.reduce_mean(bb_max)
+    return bb_reduced_mean
+
 
 #https://keras.io/examples/vision/oxford_pets_image_segmentation/
 #***COPIED MODEL STRUCTURE FROM THIS SITE!***
@@ -3508,13 +3615,6 @@ def get_paths_from_dataset(dataset, model_type, image_data_type):
     
 #Prepares the YOLO dataset that will be split into training, validation, test  data
 def prepare_yolo_data(mask_full_paths):
-
-  #PROBLEM - IMAGE SEG FILE NAMES AND MASK FILE NAMES DO NOT MATCH THE ANNOTATION FILE NAMES!
-  #THEREFORE, THESE CANNOT BE REFERENCED FROM ANNOTATIONS
-  #ANNOTATIONS FILE NEEDS TO BE READ DIFFERENTLY - MAYBE JUST THE FIRST PART OF IT? NEED TO IGNORE THE SECOND PART
-  # WHERE THERE IS A GUID. THE GUID OF SEG IMAGES DOESNT MATCH THE GUID OF THE YOLO IMAGES
-
-  #ALSO TODO: MIGHT NOT BE LOADING CORRECT BOUNDING BOXES
 
   #LOGIC - 
   #1 - SPLIT THE ANNOTATION FILENAME VALUE BY .
